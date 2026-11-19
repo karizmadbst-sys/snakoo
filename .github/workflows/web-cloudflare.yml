@@ -21,9 +21,9 @@ jobs:
       - name: Install Dependencies
         run: |
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci --legacy-peer-deps
           else
-            npm install
+            npm install --no-audit --no-fund --legacy-peer-deps
           fi
       - run: npm run lint
       - run: npm run typecheck:worker
@@ -45,9 +45,9 @@ jobs:
       - name: Install Dependencies
         run: |
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci --legacy-peer-deps
           else
-            npm install
+            npm install --no-audit --no-fund --legacy-peer-deps
           fi
 
       - name: Inject D1 database ID if provided via repo vars

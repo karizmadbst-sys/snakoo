@@ -27,9 +27,9 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path package-lock.json) {
-            npm ci
+            npm ci --legacy-peer-deps
           } else {
-            npm install
+            npm install --no-audit --no-fund --legacy-peer-deps
           }
 
       - name: Build Windows Desktop Executables & Installers
