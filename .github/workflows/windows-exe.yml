@@ -16,7 +16,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -24,7 +23,14 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - run: npm ci
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) {
+            npm ci
+          } else {
+            npm install
+          }
 
       - name: Build Windows Desktop Executables & Installers
         env:
