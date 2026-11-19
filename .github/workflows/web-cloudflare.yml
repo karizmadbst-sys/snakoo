@@ -55,21 +55,22 @@ jobs:
         run: |
           sed -i "s/REPLACE_WITH_YOUR_D1_DATABASE_ID/${{ vars.CLOUDFLARE_D1_DATABASE_ID }}/g" cloudflare/wrangler.toml
 
-      - name: Apply D1 Migrations & Deploy Worker + Durable Objects
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: cloudflare
-          command: d1 migrations apply deep-tile-db --remote
+      - name: Install Wrangler CLI
+        run: npm install -g wrangler@latest --no-audit --no-fund
+
+      - name: Apply D1 Migrations
+        working-directory: cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler d1 migrations apply deep-tile-db --remote
 
       - name: Deploy Multiplayer Worker
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: cloudflare
-          command: deploy
+        working-directory: cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy
 
       - name: Build Frontend Bundle for Cloudflare Pages
         env:
@@ -78,8 +79,7 @@ jobs:
         run: npm run build
 
       - name: Deploy Frontend to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=${{ vars.CLOUDFLARE_PAGES_PROJECT || 'deep-tile' }} --branch=main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler pages deploy dist --project-name="${{ vars.CLOUDFLARE_PAGES_PROJECT || 'deep-tile' }}" --branch=main
