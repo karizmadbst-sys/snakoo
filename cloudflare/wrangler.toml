@@ -1,0 +1,30 @@
+name = "deep-tile-multiplayer"
+main = "src/worker.ts"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGINS = "*"
+DISCONNECT_GRACE_MS = "8000"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "deep-tile-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[durable_objects]
+bindings = [
+  { name = "PRESENCE_HUB", class_name = "PresenceHubDO" },
+  { name = "GAME_ROOM", class_name = "GameRoomDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PresenceHubDO", "GameRoomDO"]
+
+# Optional TURN relay secrets for strict cellular/corporate WebRTC NAT traversal:
+# Run:
+#   npx wrangler secret put VOICE_TURN_URL
+#   npx wrangler secret put VOICE_TURN_USERNAME
+#   npx wrangler secret put VOICE_TURN_CREDENTIAL
