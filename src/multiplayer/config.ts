@@ -7,7 +7,7 @@
  * 3. `DEFAULT_CLOUDFLARE_WORKER_URL` (optional hardcoded Worker URL for zero-config builds)
  * 4. Same-origin fallback (`window.location.host`) for local Node.js development (`npm run dev`)
  */
-export const DEFAULT_CLOUDFLARE_WORKER_URL = '';
+export const DEFAULT_CLOUDFLARE_WORKER_URL = 'https://deep-tile-multiplayer.karizmadbst.workers.dev';
 
 function normalizeHttpBase(raw: string | undefined): string {
   const trimmed = (raw || '').trim().replace(/\/+$/, '');
