@@ -26,6 +26,7 @@ export interface TextureBundle {
   monsterEye: THREE.CanvasTexture;
   readonly compact?: boolean;
   setAnisotropy: (maxAniso: number) => void;
+  markAllDirty?: () => void;
   dispose: () => void;
 }
 
@@ -1136,6 +1137,8 @@ export function createProceduralTextures(maxAniso: number, compact = false): Tex
     monsterEye,
   ];
 
+  let currentAniso = aniso;
+
   return {
     tileAlbedo,
     tileBump,
@@ -1163,8 +1166,16 @@ export function createProceduralTextures(maxAniso: number, compact = false): Tex
     compact,
     setAnisotropy: (targetAniso: number) => {
       const clamped = Math.min(8, Math.max(1, targetAniso));
+      if (clamped === currentAniso) return;
+      currentAniso = clamped;
       for (let i = 0; i < all.length; i++) {
         all[i].anisotropy = clamped;
+        all[i].needsUpdate = true;
+      }
+    },
+    markAllDirty: () => {
+      for (let i = 0; i < all.length; i++) {
+        all[i].needsUpdate = true;
       }
     },
     dispose: () => {

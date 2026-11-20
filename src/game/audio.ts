@@ -269,6 +269,16 @@ export class SoundEngine {
   }
 
   public unlock(): void {
+    if (
+      this.ctx &&
+      this.ctx.state === 'running' &&
+      this.screamDecodePromises.female &&
+      this.screamDecodePromises.male &&
+      this.snakeEatDecodePromises.swallow &&
+      this.snakeEatDecodePromises.finalGulp
+    ) {
+      return;
+    }
     try {
       if (!this.ctx) {
         const AudioCtx =

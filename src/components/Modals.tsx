@@ -21,6 +21,81 @@ import {
   TouchControlsMode,
 } from '../game/types';
 import { CharacterSelector } from './CharacterSelector';
+import serpentisIconUrl from '../assets/serpentis-icon.png';
+
+// Preload & pin the official SERPENTIS emblem in browser memory so switching
+// screens or WebGL compositing can never evict or drop the icon bitmap.
+const MAIN_MENU_BG_URL = '/assets/aistudio/Blood_Moon_Sea_Serpent_c74c70fc.png';
+const PINNED_ICON_SOURCES = [serpentisIconUrl, '/pwa-192x192.png'] as const;
+const PINNED_ICON_CACHE: HTMLImageElement[] = [];
+if (typeof window !== 'undefined' && typeof Image !== 'undefined' && PINNED_ICON_CACHE.length === 0) {
+  const img = new Image();
+  img.decoding = 'sync';
+  img.src = serpentisIconUrl;
+  PINNED_ICON_CACHE.push(img);
+
+  const bgImg = new Image();
+  bgImg.decoding = 'sync';
+  bgImg.src = MAIN_MENU_BG_URL;
+  PINNED_ICON_CACHE.push(bgImg);
+}
+
+const SerpentisTitleLockup: React.FC = React.memo(() => {
+  const [srcIdx, setSrcIdx] = useState(0);
+  const useSvgFallback = srcIdx >= PINNED_ICON_SOURCES.length;
+
+  return (
+    <div
+      className="flex items-center gap-3 sm:gap-3.5 select-none"
+      aria-label="SERPENTIS"
+    >
+      <div
+        className="relative w-11 h-11 sm:w-12 sm:h-12 md:w-14 md:h-14 rounded-md overflow-hidden border-[1.5px] border-[#52e0b6]/55 bg-[#071519] shadow-[0_0_16px_rgba(82,224,182,0.18)] shrink-0"
+        style={{ transform: 'translateZ(0)', backfaceVisibility: 'hidden' }}
+      >
+        {!useSvgFallback ? (
+          <img
+            src={PINNED_ICON_SOURCES[srcIdx]}
+            alt="SERPENTIS icon"
+            width={56}
+            height={56}
+            loading="eager"
+            decoding="sync"
+            draggable={false}
+            onError={() => setSrcIdx((prev) => prev + 1)}
+            className="block w-full h-full object-cover"
+            style={{ transform: 'translateZ(0)' }}
+          />
+        ) : (
+          <svg
+            viewBox="0 0 64 64"
+            className="block w-full h-full"
+            aria-hidden="true"
+          >
+            <rect width="64" height="64" fill="#07191e" />
+            <path
+              d="M16 46 C18 28, 30 16, 46 18 C39 24, 34 31, 44 40 C36 46, 25 48, 16 46 Z"
+              fill="#52e0b6"
+              fillOpacity="0.88"
+            />
+            <circle cx="38" cy="24" r="3.2" fill="#ff3b30" />
+          </svg>
+        )}
+      </div>
+      <div className="flex flex-col leading-none min-w-0">
+        <span
+          className="text-[26px] sm:text-[32px] md:text-[38px] font-extrabold text-[#e9f2f4] tracking-[0.14em]"
+          style={{ fontFamily: 'Inter, system-ui, sans-serif' }}
+        >
+          SERPENTIS
+        </span>
+        <span className="mt-1 text-[9px] sm:text-[10.5px] md:text-[11.5px] font-mono text-[#7fa1a8] tracking-[0.28em] uppercase">
+          POOLROOMS HORROR SURVIVAL
+        </span>
+      </div>
+    </div>
+  );
+});
 
 const WING_LEVELS: LevelSummary[][] = SECTOR_WINGS.map((w) =>
   LEVEL_CATALOG.filter((l) => l.id >= w.startId && l.id <= w.endId)
@@ -70,15 +145,29 @@ export const MainMenu: React.FC<MainMenuProps> = React.memo(({
   const targetLevel = getLevelSummary(continueLevelId);
 
   return (
-    <div
-      className="fixed inset-0 z-20 flex flex-col justify-between py-2.5 px-4 sm:py-3.5 sm:px-6 md:py-5 md:px-8 overflow-y-auto pointer-events-none bg-gradient-to-r from-[#070b0d]/92 via-[#0a1013]/68 to-[#070b0d]/42"
-      style={{
-        paddingTop: 'max(0.625rem, env(safe-area-inset-top))',
-        paddingBottom: 'max(0.625rem, env(safe-area-inset-bottom))',
-        paddingLeft: 'max(1rem, env(safe-area-inset-left))',
-        paddingRight: 'max(1rem, env(safe-area-inset-right))',
-      }}
-    >
+    <>
+      <div
+        aria-hidden="true"
+        className="fixed inset-0 z-10 pointer-events-none select-none overflow-hidden bg-[#07090b]"
+      >
+        <img
+          src={MAIN_MENU_BG_URL}
+          alt=""
+          loading="eager"
+          decoding="sync"
+          draggable={false}
+          className="block w-full h-full object-cover object-center"
+        />
+      </div>
+      <div
+        className="fixed inset-0 z-20 flex flex-col justify-between py-2.5 px-4 sm:py-3.5 sm:px-6 md:py-5 md:px-8 overflow-y-auto pointer-events-none bg-gradient-to-r from-[#070b0d]/72 via-[#0a1013]/38 to-[#070b0d]/30"
+        style={{
+          paddingTop: 'max(0.625rem, env(safe-area-inset-top))',
+          paddingBottom: 'max(0.625rem, env(safe-area-inset-bottom))',
+          paddingLeft: 'max(1rem, env(safe-area-inset-left))',
+          paddingRight: 'max(1rem, env(safe-area-inset-right))',
+        }}
+      >
       {/* Top subtle classification tag */}
       <div className="text-[10px] sm:text-[11px] font-mono tracking-[0.22em] text-[#7f9aa1] uppercase shrink-0">
         SUBSURFACE NATATORIUM · FACILITY 09
@@ -89,58 +178,7 @@ export const MainMenu: React.FC<MainMenuProps> = React.memo(({
         <div className="col-span-7 flex flex-col gap-2.5 sm:gap-3.5">
           <div className="flex flex-col gap-1.5 sm:gap-2">
             {/* Title Lockup with Official SERPENTIS Icon */}
-            <svg
-              viewBox="0 0 380 86"
-              className="w-48 sm:w-60 md:w-72 lg:w-80 h-auto"
-              aria-label="SERPENTIS"
-            >
-              <defs>
-                <clipPath id="serpentis-emblem-clip">
-                  <rect x="2" y="10" width="56" height="56" rx="6" />
-                </clipPath>
-              </defs>
-              <image
-                href="/pwa-192x192.png?v=2"
-                x="2"
-                y="10"
-                width="56"
-                height="56"
-                preserveAspectRatio="xMidYMid slice"
-                clipPath="url(#serpentis-emblem-clip)"
-              />
-              <rect
-                x="2"
-                y="10"
-                width="56"
-                height="56"
-                rx="6"
-                fill="none"
-                stroke="#52e0b6"
-                strokeOpacity="0.55"
-                strokeWidth="1.5"
-              />
-              <text
-                x="76"
-                y="46"
-                fill="#e9f2f4"
-                fontFamily="Inter, system-ui, sans-serif"
-                fontWeight="800"
-                fontSize="38"
-                letterSpacing="5.5"
-              >
-                SERPENTIS
-              </text>
-              <text
-                x="78"
-                y="67"
-                fill="#7fa1a8"
-                fontFamily="monospace"
-                fontSize="11.5"
-                letterSpacing="3.5"
-              >
-                POOLROOMS HORROR SURVIVAL
-              </text>
-            </svg>
+            <SerpentisTitleLockup />
 
             <p className="text-[11px] sm:text-xs md:text-sm text-[#a7bec4] leading-snug max-w-sm">
               Cross 100 flooded subterranean pool halls before the clock runs out. Stay on
@@ -209,7 +247,8 @@ export const MainMenu: React.FC<MainMenuProps> = React.memo(({
       <div className="text-[10px] sm:text-[11px] font-mono tracking-wider text-[#849da3] shrink-0 truncate">
         WASD Move · Space Jump · Shift Run · Mouse Look · Esc Pause · Touch Joystick Supported
       </div>
-    </div>
+      </div>
+    </>
   );
 });
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { GameHud } from './components/GameHud';
 import { LandscapeGuard } from './components/LandscapeGuard';
+import { LoadingOverlay } from './components/LoadingOverlay';
 import {
   computeStars,
   GameOverModal,
@@ -19,8 +20,10 @@ import {
 } from './components/MultiplayerModal';
 import { TouchControls, TouchControlsCustomizer } from './components/TouchControls';
 import { InGameVoiceHud } from './components/VoiceControls';
+import { setCharacterPreviewPaused } from './game/characterPreview';
 import { PoolGameEngine } from './game/engine';
 import { getLevelSummary, LEVEL_CATALOG, TOTAL_LEVELS } from './game/levels';
+import { preloadCoreAssets, waitAnimationFrames } from './game/preloader';
 import {
   CharacterId,
   DEFAULT_SETTINGS,
@@ -35,7 +38,7 @@ import {
   TouchLayoutConfig,
 } from './game/types';
 import { MultiplayerClient, type MultiplayerSnapshot } from './multiplayer/client';
-import type { MatchResultSummary } from './multiplayer/types';
+import type { MatchResultSummary, WorldSyncPayload } from './multiplayer/types';
 import { VoiceChatManager, type VoiceChatSnapshot } from './multiplayer/voice';
 
 const STORAGE_SAVE_KEY = 'deep_tile_save_v1';
@@ -175,10 +178,94 @@ export default function App() {
   const [mpTotalCount, setMpTotalCount] = useState(0);
   const [mpMatchResult, setMpMatchResult] = useState<MatchResultSummary | null>(null);
 
+  // Loading & seamless scene transition overlay state
+  const [loadingOverlay, setLoadingOverlay] = useState<{
+    visible: boolean;
+    fadingOut: boolean;
+    progress: number;
+    label: string;
+    sublabel?: string;
+  }>({
+    visible: true,
+    fadingOut: false,
+    progress: 12,
+    label: 'INITIALIZING FACILITY 09...',
+    sublabel: 'LOADING INTERFACE & ASSETS',
+  });
+  const [isTransitioningToPlay, setIsTransitioningToPlay] = useState(false);
+
   const activeLevelIdRef = useRef<number>(1);
   const latestElapsedRef = useRef<number>(0);
   const isMpMatchRef = useRef<boolean>(false);
   isMpMatchRef.current = isMultiplayerMatch;
+  const transitionTokenRef = useRef<number>(0);
+  const fadeTimerRef = useRef<number | null>(null);
+  const isPreparingMpRef = useRef<boolean>(false);
+  const pendingWorldSyncRef = useRef<WorldSyncPayload | null>(null);
+
+  const clearFadeTimer = useCallback(() => {
+    if (fadeTimerRef.current !== null) {
+      window.clearTimeout(fadeTimerRef.current);
+      fadeTimerRef.current = null;
+    }
+  }, []);
+
+  const beginLoadingTransition = useCallback(
+    (label: string, sublabel?: string, initialProgress = 14): number => {
+      clearFadeTimer();
+      transitionTokenRef.current += 1;
+      const token = transitionTokenRef.current;
+      setLoadingOverlay({
+        visible: true,
+        fadingOut: false,
+        progress: initialProgress,
+        label,
+        sublabel,
+      });
+      return token;
+    },
+    [clearFadeTimer]
+  );
+
+  const updateLoadingProgress = useCallback((token: number, progress: number, label?: string) => {
+    if (transitionTokenRef.current !== token) return;
+    setLoadingOverlay((prev) => ({
+      ...prev,
+      progress: Math.max(prev.progress, progress),
+      label: label ?? prev.label,
+    }));
+  }, []);
+
+  const finishLoadingTransition = useCallback(
+    (token: number) => {
+      if (transitionTokenRef.current !== token) return;
+      clearFadeTimer();
+      setLoadingOverlay((prev) => ({
+        ...prev,
+        progress: 100,
+        fadingOut: true,
+      }));
+      fadeTimerRef.current = window.setTimeout(() => {
+        fadeTimerRef.current = null;
+        if (transitionTokenRef.current !== token) return;
+        setLoadingOverlay((prev) => ({ ...prev, visible: false, fadingOut: false }));
+      }, 220);
+    },
+    [clearFadeTimer]
+  );
+
+  const abortLoadingTransition = useCallback(() => {
+    clearFadeTimer();
+    transitionTokenRef.current += 1;
+    isPreparingMpRef.current = false;
+    pendingWorldSyncRef.current = null;
+    setIsTransitioningToPlay(false);
+    setLoadingOverlay((prev) => (prev.visible ? { ...prev, visible: false, fadingOut: false } : prev));
+  }, [clearFadeTimer]);
+
+  useEffect(() => {
+    return () => clearFadeTimer();
+  }, [clearFadeTimer]);
 
   useEffect(() => {
     const hasTouch =
@@ -269,6 +356,20 @@ export default function App() {
     }, characterId);
 
     engineRef.current = engine;
+
+    // Preload and decode all core interface assets (icon, menu background, character slot portraits)
+    // before revealing the main interface so nothing ever flashes blank or disappears.
+    const bootToken = transitionTokenRef.current;
+    void (async () => {
+      await preloadCoreAssets((pct, label) => {
+        updateLoadingProgress(bootToken, pct, label);
+      });
+      if (transitionTokenRef.current !== bootToken) return;
+      engine.renderImmediateReadyFrame();
+      await waitAnimationFrames(2);
+      finishLoadingTransition(bootToken);
+    })();
+
     return () => {
       engine.dispose();
       engineRef.current = null;
@@ -280,7 +381,8 @@ export default function App() {
   useEffect(() => {
     const unsubSnap = mpClient.subscribe((snap) => {
       setMpSnap(snap);
-      if (isMpMatchRef.current && snap.room && snap.room.status === 'lobby') {
+      if ((isMpMatchRef.current || isPreparingMpRef.current) && snap.room && snap.room.status === 'lobby') {
+        abortLoadingTransition();
         setIsMultiplayerMatch(false);
         setMpMatchResult(null);
         setMpLocalStatus('playing');
@@ -294,25 +396,65 @@ export default function App() {
     const unsubStart = mpClient.onGameStarted((payload) => {
       const uid = mpClient.getSnapshot().user?.id;
       if (!uid) return;
-      setShowMultiplayer(false);
-      setShowLevels(false);
-      setShowSettings(false);
-      setMpMatchResult(null);
-      setMpLocalStatus('playing');
-      setMpAliveCount(payload.players.filter((p) => p.alive && !p.escaped).length);
-      setMpTotalCount(payload.players.length);
-      setIsMultiplayerMatch(true);
-      setPhase('playing');
-      engineRef.current?.startMultiplayerLevel(
-        payload.levelId,
-        uid,
-        payload.players,
-        payload.monsters,
-        payload.elapsedSec ?? 0
+      const lvl = getLevelSummary(payload.levelId);
+      const token = beginLoadingTransition(
+        `SYNCHRONIZING ${lvl.code}...`,
+        lvl.name.toUpperCase(),
+        14
       );
+      isPreparingMpRef.current = true;
+      pendingWorldSyncRef.current = null;
+      setIsTransitioningToPlay(true);
+
+      void (async () => {
+        await waitAnimationFrames(1);
+        if (transitionTokenRef.current !== token) return;
+
+        await preloadCoreAssets();
+        if (transitionTokenRef.current !== token) return;
+
+        const engine = engineRef.current;
+        if (engine) {
+          await engine.prepareMultiplayerLevelAsync(
+            payload.levelId,
+            uid,
+            payload.players,
+            payload.monsters,
+            payload.elapsedSec ?? 0,
+            (pct, label) => updateLoadingProgress(token, pct, label)
+          );
+          if (transitionTokenRef.current !== token) return;
+
+          if (pendingWorldSyncRef.current) {
+            engine.applyMultiplayerWorld(pendingWorldSyncRef.current);
+            pendingWorldSyncRef.current = null;
+            engine.renderImmediateReadyFrame();
+          }
+        }
+
+        if (transitionTokenRef.current !== token) return;
+        isPreparingMpRef.current = false;
+        setShowMultiplayer(false);
+        setShowLevels(false);
+        setShowSettings(false);
+        setMpMatchResult(null);
+        setMpLocalStatus('playing');
+        setMpAliveCount(payload.players.filter((p) => p.alive && !p.escaped).length);
+        setMpTotalCount(payload.players.length);
+        setIsMultiplayerMatch(true);
+        setPhase('playing');
+        setIsTransitioningToPlay(false);
+
+        await waitAnimationFrames(2);
+        finishLoadingTransition(token);
+      })();
     });
 
     const unsubWorld = mpClient.onWorldSync((world) => {
+      if (isPreparingMpRef.current) {
+        pendingWorldSyncRef.current = world;
+        return;
+      }
       engineRef.current?.applyMultiplayerWorld(world);
       let aliveCount = 0;
       for (let i = 0; i < world.players.length; i++) {
@@ -327,11 +469,13 @@ export default function App() {
     });
 
     const unsubPlayerEvent = mpClient.onPlayerEvent((ev) => {
+      if (isPreparingMpRef.current) return;
       engineRef.current?.handleMultiplayerPlayerEvent(ev);
     });
 
     const unsubNotice = mpClient.onRoomNotice(() => {
-      if (isMpMatchRef.current) {
+      if (isMpMatchRef.current || isPreparingMpRef.current) {
+        abortLoadingTransition();
         setIsMultiplayerMatch(false);
         setMpMatchResult(null);
         setMpLocalStatus('playing');
@@ -352,7 +496,7 @@ export default function App() {
       unsubNotice();
       mpClient.dispose();
     };
-  }, [mpClient]);
+  }, [mpClient, abortLoadingTransition, beginLoadingTransition, finishLoadingTransition, updateLoadingProgress]);
 
   // VoiceChatManager lifecycle & room-scoped synchronization
   useEffect(() => {
@@ -377,9 +521,15 @@ export default function App() {
   // Pause 3D rendering whenever full-screen modals or portrait orientation lock completely occlude the viewport
   useEffect(() => {
     const occluded =
-      isPortraitBlocked || showMultiplayer || showLevels || showSettings || showTouchCustomizer;
+      !isTransitioningToPlay &&
+      (isPortraitBlocked || showMultiplayer || showLevels || showSettings || showTouchCustomizer);
     engineRef.current?.setOverlayOccluded(occluded);
-  }, [isPortraitBlocked, showMultiplayer, showLevels, showSettings, showTouchCustomizer]);
+  }, [isTransitioningToPlay, isPortraitBlocked, showMultiplayer, showLevels, showSettings, showTouchCustomizer]);
+
+  // Never allow offscreen character-preview WebGL rendering to run during active gameplay
+  useEffect(() => {
+    setCharacterPreviewPaused(phase === 'playing' || phase === 'jumpscare');
+  }, [phase]);
 
   // Auto-pause active single-player run if mobile device rotates to portrait
   useEffect(() => {
@@ -436,22 +586,67 @@ export default function App() {
   const handleStartLevel = useCallback(
     (levelId: number) => {
       const targetId = isLevelUnlocked(levelId, saveData) ? levelId : 1;
-      setIsMultiplayerMatch(false);
-      setMpMatchResult(null);
-      setShowLevels(false);
-      setShowSettings(false);
-      setShowMultiplayer(false);
-      setPhase('playing');
-      engineRef.current?.startLevel(targetId);
+      const lvl = getLevelSummary(targetId);
+      const token = beginLoadingTransition(
+        `PREPARING ${lvl.code}...`,
+        lvl.name.toUpperCase(),
+        14
+      );
+      setIsTransitioningToPlay(true);
+
+      void (async () => {
+        await waitAnimationFrames(1);
+        if (transitionTokenRef.current !== token) return;
+
+        await preloadCoreAssets();
+        if (transitionTokenRef.current !== token) return;
+
+        const engine = engineRef.current;
+        if (engine) {
+          await engine.prepareLevelAsync(targetId, (pct, label) =>
+            updateLoadingProgress(token, pct, label)
+          );
+        }
+        if (transitionTokenRef.current !== token) return;
+
+        setIsMultiplayerMatch(false);
+        setMpMatchResult(null);
+        setShowLevels(false);
+        setShowSettings(false);
+        setShowMultiplayer(false);
+        setPhase('playing');
+        setIsTransitioningToPlay(false);
+
+        await waitAnimationFrames(2);
+        finishLoadingTransition(token);
+      })();
     },
-    [saveData]
+    [saveData, beginLoadingTransition, updateLoadingProgress, finishLoadingTransition]
   );
 
   const handleRestart = useCallback(() => {
     if (isMpMatchRef.current) return;
-    setPhase('playing');
-    engineRef.current?.restartLevel();
-  }, []);
+    const lvl = getLevelSummary(activeLevelIdRef.current);
+    const token = beginLoadingTransition(`RESTARTING ${lvl.code}...`, lvl.name.toUpperCase(), 20);
+    setIsTransitioningToPlay(true);
+
+    void (async () => {
+      await waitAnimationFrames(1);
+      if (transitionTokenRef.current !== token) return;
+
+      const engine = engineRef.current;
+      if (engine) {
+        await engine.restartLevelAsync((pct, label) => updateLoadingProgress(token, pct, label));
+      }
+      if (transitionTokenRef.current !== token) return;
+
+      setPhase('playing');
+      setIsTransitioningToPlay(false);
+
+      await waitAnimationFrames(2);
+      finishLoadingTransition(token);
+    })();
+  }, [beginLoadingTransition, updateLoadingProgress, finishLoadingTransition]);
 
   const handleRespawnCheckpoint = useCallback(() => {
     if (isMpMatchRef.current) return;
@@ -472,6 +667,7 @@ export default function App() {
   }, []);
 
   const handleQuitToMenu = useCallback(() => {
+    abortLoadingTransition();
     if (isMpMatchRef.current) {
       mpClient.leaveRoom();
       setIsMultiplayerMatch(false);
@@ -483,7 +679,7 @@ export default function App() {
     setShowLevels(false);
     setPhase('menu');
     engineRef.current?.showMenuBackdrop(1);
-  }, [mpClient]);
+  }, [mpClient, abortLoadingTransition]);
 
   const handleVirtualMove = useCallback((x: number, y: number, run: boolean) => {
     engineRef.current?.setVirtualInput(x, y, run);
@@ -558,6 +754,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const targetTag = (e.target as HTMLElement | null)?.tagName;
       if (targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT') return;
+      if (loadingOverlay.visible && !loadingOverlay.fadingOut) return;
       if (showLevels || showSettings || showMultiplayer || showTouchCustomizer) return;
       if (phase === 'menu' && (e.code === 'Enter' || e.code === 'Space')) {
         e.preventDefault();
@@ -580,6 +777,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [
     phase,
+    loadingOverlay.visible,
+    loadingOverlay.fadingOut,
     showLevels,
     showSettings,
     showMultiplayer,
@@ -800,6 +999,15 @@ export default function App() {
           onCancel={handleCancelTouchLayout}
         />
       )}
+
+      {/* Smooth Scene & Asset Preload Transition Overlay */}
+      <LoadingOverlay
+        visible={loadingOverlay.visible}
+        fadingOut={loadingOverlay.fadingOut}
+        progress={loadingOverlay.progress}
+        label={loadingOverlay.label}
+        sublabel={loadingOverlay.sublabel}
+      />
 
       {/* Mandatory Mobile Landscape-Only Enforcement Guard */}
       <LandscapeGuard onPortraitBlockChange={setIsPortraitBlocked} />

@@ -5,6 +5,7 @@ import {
   animateHumanRig,
   createRealisticHumanRig,
   disposeCharacterResources,
+  markCharacterTexturesDirty,
   resetHumanRigPose,
   setCharacterQualityTier,
   type HairPhysicsNode,
@@ -15,6 +16,7 @@ import { TextureBundle } from './textures';
 import type { ActiveQualityTier, CharacterId } from './types';
 
 export type { HairPhysicsNode, PlayerAnimState, PlayerRig };
+export { markCharacterTexturesDirty as markEntityTexturesDirty };
 
 function tagShared<T extends THREE.BufferGeometry | THREE.Material>(obj: T): T {
   obj.userData.sharedPool = true;
@@ -22,13 +24,13 @@ function tagShared<T extends THREE.BufferGeometry | THREE.Material>(obj: T): T {
 }
 
 interface MonsterSharedPool {
-  skinMat: THREE.MeshPhysicalMaterial;
-  finMat: THREE.MeshPhysicalMaterial;
-  hornMat: THREE.MeshPhysicalMaterial;
-  mouthMat: THREE.MeshPhysicalMaterial;
-  eyeIrisMat: THREE.MeshPhysicalMaterial;
-  corneaMat: THREE.MeshPhysicalMaterial;
-  toothMat: THREE.MeshPhysicalMaterial;
+  skinMat: THREE.MeshStandardMaterial;
+  finMat: THREE.MeshStandardMaterial;
+  hornMat: THREE.MeshStandardMaterial;
+  mouthMat: THREE.MeshStandardMaterial;
+  eyeIrisMat: THREE.MeshStandardMaterial;
+  corneaMat: THREE.MeshStandardMaterial;
+  toothMat: THREE.MeshStandardMaterial;
   upperSkullGeo: THREE.BufferGeometry;
   palateGeo: THREE.BufferGeometry;
   mergedHornsGeo: THREE.BufferGeometry | null;
@@ -134,14 +136,20 @@ export function setEntityQualityTier(textures: TextureBundle, tier: ActiveQualit
     const m = pool.monster;
     const isSmooth = tier === 'smooth';
     const isUltra = tier === 'ultra';
-    // Keep clearcoat positive on all tiers so switching quality never triggers WebGL shader recompiles
-    m.skinMat.clearcoat = isSmooth ? 0.35 : 0.94;
-    m.skinMat.roughness = 0.28;
+    m.skinMat.roughness = textures.compact ? 0.22 : 0.28;
     m.skinMat.envMapIntensity = isSmooth ? 0.85 : isUltra ? 1.52 : 1.32;
-    m.finMat.clearcoat = isSmooth ? 0.3 : 0.88;
-    m.hornMat.clearcoat = isSmooth ? 0.25 : 0.82;
-    m.mouthMat.clearcoat = isSmooth ? 0.35 : 0.96;
-    m.toothMat.clearcoat = isSmooth ? 0.3 : 0.88;
+    if ('clearcoat' in m.skinMat) {
+      (m.skinMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.35 : 0.94;
+    }
+    if ('clearcoat' in m.finMat) {
+      (m.finMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.3 : 0.88;
+    }
+    if ('clearcoat' in m.mouthMat) {
+      (m.mouthMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.35 : 0.96;
+    }
+    if ('clearcoat' in m.toothMat) {
+      (m.toothMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.3 : 0.85;
+    }
   }
 }
 
@@ -340,9 +348,9 @@ export interface MonsterRig {
 const SERPENT_BONE_COUNT = 24;
 const SERPENT_BONE_STEP = 0.86;
 
-function buildContinuousSerpentBodyGeometry(scale: number): THREE.BufferGeometry {
-  const axialRings = 160;
-  const radialSegs = 40;
+function buildContinuousSerpentBodyGeometry(scale: number, compact = false): THREE.BufferGeometry {
+  const axialRings = compact ? 96 : 136;
+  const radialSegs = compact ? 22 : 32;
   const totalLength = (SERPENT_BONE_COUNT - 1) * SERPENT_BONE_STEP; // ~19.78m before scale
   const zStart = 0.28; // locks deeply into rear skull collar
   const zSpan = totalLength + 0.62;
@@ -992,99 +1000,149 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
 
   const isSmooth = rootPool.quality === 'smooth';
   const isUltra = rootPool.quality === 'ultra';
+  const useLightMats = Boolean(textures.compact);
 
   const skinMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
-      map: textures.monsterSkin,
-      normalMap: textures.monsterNormal,
-      normalScale: new THREE.Vector2(1.9, 1.9),
-      roughnessMap: textures.monsterRoughness,
-      roughness: 0.28,
-      metalness: 0.14,
-      emissive: new THREE.Color(0xffffff),
-      emissiveMap: textures.monsterEmissive,
-      emissiveIntensity: 1.05,
-      clearcoat: isSmooth ? 0.35 : 0.94,
-      clearcoatRoughness: 0.06,
-      ior: 1.46,
-      envMapIntensity: isSmooth ? 0.85 : isUltra ? 1.52 : 1.32,
-    })
+    useLightMats
+      ? new THREE.MeshStandardMaterial({
+          map: textures.monsterSkin,
+          normalMap: textures.monsterNormal,
+          normalScale: new THREE.Vector2(1.75, 1.75),
+          roughnessMap: textures.monsterRoughness,
+          roughness: 0.22,
+          metalness: 0.18,
+          emissive: new THREE.Color(0xffffff),
+          emissiveMap: textures.monsterEmissive,
+          emissiveIntensity: 1.05,
+          envMapIntensity: isSmooth ? 0.95 : 1.35,
+        })
+      : new THREE.MeshPhysicalMaterial({
+          map: textures.monsterSkin,
+          normalMap: textures.monsterNormal,
+          normalScale: new THREE.Vector2(1.9, 1.9),
+          roughnessMap: textures.monsterRoughness,
+          roughness: 0.28,
+          metalness: 0.14,
+          emissive: new THREE.Color(0xffffff),
+          emissiveMap: textures.monsterEmissive,
+          emissiveIntensity: 1.05,
+          clearcoat: isSmooth ? 0.35 : 0.94,
+          clearcoatRoughness: 0.06,
+          ior: 1.46,
+          envMapIntensity: isSmooth ? 0.85 : isUltra ? 1.52 : 1.32,
+        })
   );
 
   const finMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
-      map: textures.monsterFinSkin,
-      emissive: new THREE.Color(0xffffff),
-      emissiveMap: textures.monsterFinEmissive,
-      emissiveIntensity: 0.88,
-      roughness: 0.22,
-      metalness: 0.16,
-      clearcoat: isSmooth ? 0.3 : 0.88,
-      clearcoatRoughness: 0.08,
-      side: THREE.DoubleSide,
-    })
+    useLightMats
+      ? new THREE.MeshStandardMaterial({
+          map: textures.monsterFinSkin,
+          emissive: new THREE.Color(0xffffff),
+          emissiveMap: textures.monsterFinEmissive,
+          emissiveIntensity: 0.88,
+          roughness: 0.18,
+          metalness: 0.2,
+          side: THREE.DoubleSide,
+        })
+      : new THREE.MeshPhysicalMaterial({
+          map: textures.monsterFinSkin,
+          emissive: new THREE.Color(0xffffff),
+          emissiveMap: textures.monsterFinEmissive,
+          emissiveIntensity: 0.88,
+          roughness: 0.22,
+          metalness: 0.16,
+          clearcoat: isSmooth ? 0.3 : 0.88,
+          clearcoatRoughness: 0.08,
+          side: THREE.DoubleSide,
+        })
   );
 
   // Dark blood-crimson obsidian chitin for horns & radiating whisker-spines matching icon
   const hornMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       color: 0x2c0509,
-      roughness: 0.24,
-      metalness: 0.18,
-      clearcoat: isSmooth ? 0.25 : 0.82,
-      clearcoatRoughness: 0.1,
+      roughness: 0.2,
+      metalness: 0.24,
+      envMapIntensity: 1.25,
     })
   );
 
   const mouthMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
-      color: 0x4b0d14,
-      emissive: 0xff101f,
-      emissiveIntensity: 2.0,
-      roughness: 0.14,
-      metalness: 0.02,
-      clearcoat: isSmooth ? 0.35 : 0.96,
-      clearcoatRoughness: 0.06,
-      side: THREE.DoubleSide,
-    })
+    useLightMats
+      ? new THREE.MeshStandardMaterial({
+          color: 0x4b0d14,
+          emissive: 0xff101f,
+          emissiveIntensity: 2.0,
+          roughness: 0.12,
+          metalness: 0.06,
+          side: THREE.DoubleSide,
+        })
+      : new THREE.MeshPhysicalMaterial({
+          color: 0x4b0d14,
+          emissive: 0xff101f,
+          emissiveIntensity: 2.0,
+          roughness: 0.14,
+          metalness: 0.02,
+          clearcoat: isSmooth ? 0.35 : 0.96,
+          clearcoatRoughness: 0.06,
+          side: THREE.DoubleSide,
+        })
   );
 
   const eyeIrisMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       map: textures.monsterEye,
       emissiveMap: textures.monsterEye,
       emissive: 0xff2020,
       emissiveIntensity: 2.25,
       roughness: 0.12,
-      metalness: 0.04,
+      metalness: 0.06,
     })
   );
 
   const corneaMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
-      color: 0xffffff,
-      roughness: 0.02,
-      metalness: 0.0,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.02,
-      ior: 1.4,
-      transparent: true,
-      opacity: 0.24,
-      depthWrite: false,
-    })
+    useLightMats
+      ? new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          roughness: 0.04,
+          metalness: 0.1,
+          transparent: true,
+          opacity: 0.22,
+          depthWrite: false,
+        })
+      : new THREE.MeshPhysicalMaterial({
+          color: 0xffffff,
+          roughness: 0.02,
+          metalness: 0.0,
+          clearcoat: 1.0,
+          clearcoatRoughness: 0.02,
+          ior: 1.4,
+          transparent: true,
+          opacity: 0.24,
+          depthWrite: false,
+        })
   );
 
   const toothMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
-      color: 0xf4e8e6,
-      emissive: 0x380408,
-      emissiveIntensity: 0.32,
-      vertexColors: true,
-      roughness: 0.14,
-      metalness: 0.08,
-      clearcoat: isSmooth ? 0.3 : 0.88,
-      clearcoatRoughness: 0.09,
-    })
+    useLightMats
+      ? new THREE.MeshStandardMaterial({
+          color: 0xf4e8e6,
+          emissive: 0x380408,
+          emissiveIntensity: 0.32,
+          vertexColors: true,
+          roughness: 0.14,
+          metalness: 0.1,
+        })
+      : new THREE.MeshPhysicalMaterial({
+          color: 0xf4e8e6,
+          emissive: 0x380408,
+          emissiveIntensity: 0.32,
+          vertexColors: true,
+          roughness: 0.16,
+          metalness: 0.08,
+          clearcoat: isSmooth ? 0.3 : 0.85,
+          clearcoatRoughness: 0.08,
+        })
   );
 
   const upperSkullGeo = tagShared(sculptUpperSkullGeometry());
@@ -1585,7 +1643,7 @@ export function createMonsterRig(textures: TextureBundle, scale = 1): MonsterRig
   const scaleKey = scale.toFixed(2);
   let scaled = pool.scaledBodies.get(scaleKey);
   if (!scaled) {
-    const bodyGeo = tagShared(buildContinuousSerpentBodyGeometry(scale));
+    const bodyGeo = tagShared(buildContinuousSerpentBodyGeometry(scale, Boolean(textures.compact)));
     const finGeo = tagShared(buildContinuousDorsalFinGeometry(scale));
     const bowGeo = tagShared(new THREE.PlaneGeometry(3.8 * scale, 7.5 * scale, 12, 16));
     bowGeo.rotateX(-Math.PI / 2);

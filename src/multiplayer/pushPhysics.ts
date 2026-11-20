@@ -257,7 +257,8 @@ export function selectPushTarget(
   def: LevelDef,
   attacker: { userId: string; x: number; y: number; z: number; yaw: number },
   candidates: PushCandidate[],
-  elapsedSec: number
+  elapsedSec: number,
+  preferredTargetUserId?: string
 ): SelectedPushTarget | null {
   const fx = Math.sin(attacker.yaw);
   const fz = Math.cos(attacker.yaw);
@@ -301,8 +302,9 @@ export function selectPushTarget(
       continue;
     }
 
-    // Prefer targets well-aligned in front and close
-    const score = facingDot * 2.0 - dist * 0.45;
+    // Prefer targets well-aligned in front and close, with slight tie-break for aimed target
+    const preferredBonus = preferredTargetUserId && cand.userId === preferredTargetUserId ? 0.35 : 0;
+    const score = facingDot * 2.0 - dist * 0.45 + preferredBonus;
     if (score > bestScore) {
       bestScore = score;
       let dirX = fx * 0.6 + ux * 0.4;
@@ -325,4 +327,32 @@ export function selectPushTarget(
   }
 
   return best;
+}
+
+/**
+ * Computes a short, wall-safe authoritative knockback displacement so server state
+ * reflects pushed movement immediately for all connected observers.
+ */
+export function computePushNudge(
+  def: LevelDef,
+  x: number,
+  y: number,
+  z: number,
+  dirX: number,
+  dirZ: number,
+  stepDist: number,
+  elapsedSec: number
+): { x: number; z: number } {
+  const b = def.bounds;
+  const clampedTargetX = Math.max(b.minX + 0.4, Math.min(b.maxX - 0.4, x + dirX * stepDist));
+  const clampedTargetZ = Math.max(b.minZ + 0.4, Math.min(b.maxZ - 0.4, z + dirZ * stepDist));
+  if (!isPushPathObstructed(def, x, y, z, clampedTargetX, y, clampedTargetZ, elapsedSec)) {
+    return { x: clampedTargetX, z: clampedTargetZ };
+  }
+  const halfX = Math.max(b.minX + 0.4, Math.min(b.maxX - 0.4, x + dirX * stepDist * 0.45));
+  const halfZ = Math.max(b.minZ + 0.4, Math.min(b.maxZ - 0.4, z + dirZ * stepDist * 0.45));
+  if (!isPushPathObstructed(def, x, y, z, halfX, y, halfZ, elapsedSec)) {
+    return { x: halfX, z: halfZ };
+  }
+  return { x, z };
 }

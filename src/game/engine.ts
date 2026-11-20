@@ -16,6 +16,7 @@ import {
   createNameplateSprite,
   createPlayerRig,
   disposeEntityResources,
+  markEntityTexturesDirty,
   MonsterRig,
   PlayerAnimState,
   PlayerRig,
@@ -421,8 +422,6 @@ export class PoolGameEngine {
   private rimLight: THREE.DirectionalLight | null = null;
   private keyLight: THREE.DirectionalLight | null = null;
   private horrorSpotLight: THREE.SpotLight | null = null;
-  private horrorJawLight: THREE.PointLight | null = null;
-  private horrorRimLight: THREE.PointLight | null = null;
   private horrorComposer: EffectComposer | null = null;
   private horrorPass: ShaderPass | null = null;
   private horrorVisualBlend = 0;
@@ -506,11 +505,16 @@ export class PoolGameEngine {
   // Camera state
   private camYaw = 0; // 0 looks toward -Z
   private camPitch = 0.24;
+  private camDist = 5.0;
   private camShake = 0;
+  private pendingLookDx = 0;
+  private pendingLookDy = 0;
   private isDraggingLook = false;
+  private activeDragPointerId: number | null = null;
   private lastPointerX = 0;
   private lastPointerY = 0;
   private isPointerLocked = false;
+  private pointerLockAcquiredAt = 0;
 
   // Input state (continuous held + mobile virtual joystick)
   private heldKeys = new Set<string>();
@@ -558,6 +562,13 @@ export class PoolGameEngine {
   private autoDowngradeCount = 0;
   private dynamicResScale = 1.0;
   private renderFrameIdx = 0;
+  private _appliedPixelRatio = -1;
+  private _appliedViewportW = 0;
+  private _appliedViewportH = 0;
+  private _appliedShadowEnabled: boolean | null = null;
+  private _appliedShadowType: THREE.ShadowMapType | null = null;
+  private _appliedAniso = -1;
+  private _appliedQualityTier: ActiveQualityTier | '' = '';
   private hudEmitTimer = 0;
   private lastHudSnap = {
     levelId: -1,
@@ -655,6 +666,8 @@ export class PoolGameEngine {
 
     const initVp = this.getViewportSize();
     this.renderer.setSize(initVp.w, initVp.h);
+    this._appliedViewportW = initVp.w;
+    this._appliedViewportH = initVp.h;
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
@@ -700,7 +713,7 @@ export class PoolGameEngine {
       });
     }
 
-    // Pre-allocated devouring horror lights (intensity=0 outside jumpscare so gameplay lighting is untouched)
+    // Pre-allocated devouring horror spotlight (intensity=0 outside jumpscare; jaw/rim reuse pointLightPool[0..1])
     this.horrorSpotLight = new THREE.SpotLight('#bcdce6', 0, 24, 0.42, 0.62, 1.55);
     this.horrorSpotLight.castShadow = false;
     this.horrorSpotLight.shadow.mapSize.set(1024, 1024);
@@ -711,13 +724,7 @@ export class PoolGameEngine {
     this.scene.add(this.horrorSpotLight);
     this.scene.add(this.horrorSpotLight.target);
 
-    this.horrorJawLight = new THREE.PointLight('#ff160f', 0, 9.5, 1.85);
-    this.scene.add(this.horrorJawLight);
-
-    this.horrorRimLight = new THREE.PointLight('#4d8ea8', 0, 14, 1.6);
-    this.scene.add(this.horrorRimLight);
-
-    if (!this.isSoftwareGl) {
+    if (!this.isSoftwareGl && !this.isTouchDevice && !this.isLowEndGpu) {
       const composerRT = new THREE.WebGLRenderTarget(initVp.w, initVp.h, {
         type: THREE.HalfFloatType,
         samples: 0,
@@ -778,12 +785,118 @@ export class PoolGameEngine {
     this.playerRig.root.updateMatrixWorld(true);
   }
 
+  private groundPlayerOnSpawnPlatform(): void {
+    const b = this.currentLevel.bounds;
+    if (
+      !Number.isFinite(this.playerPos.x) ||
+      !Number.isFinite(this.playerPos.y) ||
+      !Number.isFinite(this.playerPos.z) ||
+      this.playerPos.y < b.floorY - 0.5 ||
+      this.playerPos.y > b.ceilingY + 0.5
+    ) {
+      if (
+        Number.isFinite(this.activeSpawn.x) &&
+        Number.isFinite(this.activeSpawn.y) &&
+        Number.isFinite(this.activeSpawn.z)
+      ) {
+        this.playerPos.copy(this.activeSpawn);
+      } else {
+        this.playerPos.set(
+          this.currentLevel.spawn[0],
+          this.currentLevel.spawn[1],
+          this.currentLevel.spawn[2]
+        );
+      }
+      this.playerVel.set(0, 0, 0);
+    }
+
+    if (this.platforms.length === 0) return;
+
+    let bestPlat: RuntimePlatform | null = null;
+    let bestTopY = 0;
+    let bestDelta = Infinity;
+    for (let i = 0; i < this.platforms.length; i++) {
+      const p = this.platforms[i];
+      if (p.state === 'gone') continue;
+      const hw = p.def.size[0] * 0.5 + 0.35;
+      const hd = p.def.size[2] * 0.5 + 0.35;
+      if (
+        Math.abs(this.playerPos.x - p.currentPos.x) <= hw &&
+        Math.abs(this.playerPos.z - p.currentPos.z) <= hd
+      ) {
+        const topY = p.currentPos.y + p.def.size[1] * 0.5;
+        const delta = Math.abs(this.playerPos.y - topY);
+        if (delta <= 1.8 && delta < bestDelta) {
+          bestDelta = delta;
+          bestTopY = topY;
+          bestPlat = p;
+        }
+      }
+    }
+
+    if (bestPlat) {
+      this.playerPos.y = bestTopY;
+      this.playerVel.y = 0;
+      this.grounded = true;
+      this.stoodPlatform = bestPlat;
+      this.inWater = false;
+      this.wasInWater = false;
+    }
+  }
+
+  private ensureLocalPlayerVisible(): void {
+    const shouldBeVisible =
+      this.phase === 'playing' &&
+      !this.mpLocalBeingEaten &&
+      (!this.isMultiplayer || (this.mpLocalAlive && !this.mpLocalEscaped));
+    if (!shouldBeVisible) return;
+
+    if (this.playerRig.root.parent !== this.scene) {
+      this.scene.add(this.playerRig.root);
+    }
+    if (
+      !Number.isFinite(this.playerPos.x) ||
+      !Number.isFinite(this.playerPos.y) ||
+      !Number.isFinite(this.playerPos.z)
+    ) {
+      if (
+        Number.isFinite(this.activeSpawn.x) &&
+        Number.isFinite(this.activeSpawn.y) &&
+        Number.isFinite(this.activeSpawn.z)
+      ) {
+        this.playerPos.copy(this.activeSpawn);
+      } else {
+        this.playerPos.set(
+          this.currentLevel.spawn[0],
+          this.currentLevel.spawn[1],
+          this.currentLevel.spawn[2]
+        );
+      }
+      this.playerVel.set(0, 0, 0);
+    }
+    if (!Number.isFinite(this.playerYaw)) {
+      this.playerYaw = Math.PI;
+    }
+    const hp = this.playerRig.hips.position;
+    if (!Number.isFinite(hp.x) || !Number.isFinite(hp.y) || !Number.isFinite(hp.z)) {
+      resetPlayerRigPose(this.playerRig);
+    }
+    this.playerRig.root.scale.setScalar(1);
+    this.playerRig.setVisible(true);
+    this.playerRig.root.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        obj.visible = true;
+        obj.frustumCulled = false;
+      }
+    });
+  }
+
   private detectInitialQuality(): ActiveQualityTier {
     if (this.isSoftwareGl || this.isLowEndGpu) return 'smooth';
     const mem = (navigator as { deviceMemory?: number }).deviceMemory ?? 8;
     const cores = navigator.hardwareConcurrency ?? 8;
     if (this.isTouchDevice) {
-      return cores <= 4 || mem <= 3 ? 'smooth' : 'standard';
+      return cores <= 6 || mem <= 4 ? 'smooth' : 'standard';
     }
     return cores <= 4 || mem <= 4 ? 'standard' : 'ultra';
   }
@@ -824,6 +937,7 @@ export class PoolGameEngine {
     let aniso = 1;
     let waterEnv = 0.85;
 
+    const compactLights = this.isSoftwareGl || this.isLowEndGpu || this.isTouchDevice;
     if (q === 'ultra') {
       this.dynamicResScale = 1.0;
       targetPixelRatio = Math.min(dpr, this.isTouchDevice ? 1.4 : 1.75);
@@ -834,7 +948,7 @@ export class PoolGameEngine {
       this.splashMaxActive = 420;
       this.uCausticEnabled.value = 1;
       this.uCausticRangeSq.value = 90 * 90;
-      this.activePointLightLimit = this.isSoftwareGl ? 2 : 6;
+      this.activePointLightLimit = compactLights ? 2 : 4;
       aniso = 8;
       waterEnv = 1.75;
     } else if (q === 'standard') {
@@ -847,7 +961,7 @@ export class PoolGameEngine {
       this.splashMaxActive = 240;
       this.uCausticEnabled.value = 1;
       this.uCausticRangeSq.value = 55 * 55;
-      this.activePointLightLimit = this.isSoftwareGl ? 2 : 4;
+      this.activePointLightLimit = compactLights ? 2 : 4;
       aniso = 4;
       waterEnv = 1.48;
     } else {
@@ -874,17 +988,31 @@ export class PoolGameEngine {
     this._lastCullCamZ = NaN;
     this.needsStaticRender = true;
 
-    this.renderer.setPixelRatio(targetPixelRatio);
-    this.renderer.shadowMap.enabled = shadowEnabled;
-    if (shadowEnabled) {
-      this.renderer.shadowMap.type = shadowType;
-    }
     const vp = this.getViewportSize();
-    this.renderer.setSize(vp.w, vp.h);
-    if (this.horrorComposer) {
-      const composerDpr = Math.min(targetPixelRatio, this.isTouchDevice ? 0.85 : 1.25);
-      this.horrorComposer.setPixelRatio(composerDpr);
-      this.horrorComposer.setSize(vp.w, vp.h);
+    const prChanged = Math.abs(targetPixelRatio - this._appliedPixelRatio) > 1e-4;
+    const sizeChanged = vp.w !== this._appliedViewportW || vp.h !== this._appliedViewportH;
+
+    if (prChanged) {
+      this.renderer.setPixelRatio(targetPixelRatio);
+      this._appliedPixelRatio = targetPixelRatio;
+    }
+    if (this._appliedShadowEnabled !== shadowEnabled) {
+      this.renderer.shadowMap.enabled = shadowEnabled;
+      this._appliedShadowEnabled = shadowEnabled;
+    }
+    if (shadowEnabled && this._appliedShadowType !== shadowType) {
+      this.renderer.shadowMap.type = shadowType;
+      this._appliedShadowType = shadowType;
+    }
+    if (sizeChanged || prChanged) {
+      this.renderer.setSize(vp.w, vp.h);
+      this._appliedViewportW = vp.w;
+      this._appliedViewportH = vp.h;
+      if (this.horrorComposer) {
+        const composerDpr = Math.min(targetPixelRatio, this.isTouchDevice ? 0.85 : 1.25);
+        this.horrorComposer.setPixelRatio(composerDpr);
+        this.horrorComposer.setSize(vp.w, vp.h);
+      }
     }
 
     if (this.camera) {
@@ -896,8 +1024,14 @@ export class PoolGameEngine {
       }
     }
     if (this.textures) {
-      this.textures.setAnisotropy(aniso);
-      setEntityQualityTier(this.textures, q);
+      if (this._appliedAniso !== aniso) {
+        this.textures.setAnisotropy(aniso);
+        this._appliedAniso = aniso;
+      }
+      if (this._appliedQualityTier !== q) {
+        setEntityQualityTier(this.textures, q);
+        this._appliedQualityTier = q;
+      }
     }
     if (this.playerRig) {
       this.playerRig.setShadowDetail(q);
@@ -910,6 +1044,9 @@ export class PoolGameEngine {
     }
     if (this.waterMat) {
       this.waterMat.envMapIntensity = waterEnv;
+    }
+    if (this.waterMesh) {
+      this.waterMesh.receiveShadow = shadowEnabled && !this.isTouchDevice && q !== 'smooth';
     }
     const enableAtmosphericFX = q !== 'smooth' && !this.isSoftwareGl;
     if (this.mistMesh) {
@@ -978,17 +1115,20 @@ export class PoolGameEngine {
     this.localCharacterId = next;
     const prevRig = this.playerRig;
     const wasVisible = prevRig.root.visible && prevRig.hips.visible;
+    const shouldBeVisible =
+      this.phase === 'playing'
+        ? !this.mpLocalBeingEaten && (!this.isMultiplayer || (this.mpLocalAlive && !this.mpLocalEscaped))
+        : wasVisible;
     const pos = prevRig.root.position.clone();
     const rot = prevRig.root.rotation.clone();
-    const scale = prevRig.root.scale.clone();
 
     const nextRig = createPlayerRig(this.textures, 0x52e0b6, false, next);
     nextRig.setShadowDetail(this.activeQuality);
     resetPlayerRigPose(nextRig);
     nextRig.root.position.copy(pos);
     nextRig.root.rotation.copy(rot);
-    nextRig.root.scale.copy(scale);
-    nextRig.setVisible(wasVisible);
+    nextRig.root.scale.setScalar(1);
+    nextRig.setVisible(shouldBeVisible);
     if (this.phase === 'playing') {
       animatePlayerRig(nextRig, this.mpLastAnimState, this.mpLastHorizSpeed, this.simTime, 0.016);
     }
@@ -998,6 +1138,7 @@ export class PoolGameEngine {
     prevRig.dispose();
     this.playerRig = nextRig;
     this.scene.add(nextRig.root);
+    this.ensureLocalPlayerVisible();
     if (this.isMultiplayer && this.phase === 'playing') {
       this.mpLastSentTime = 0;
     }
@@ -1022,22 +1163,54 @@ export class PoolGameEngine {
   }
 
   public rotateCameraByDelta(dx: number, dy: number): void {
-    const sens = 0.0028 * this.settings.mouseSensitivity;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    if (dx === 0 && dy === 0) return;
+    const sens = 0.0042 * this.settings.mouseSensitivity;
     const ySign = this.settings.invertY ? -1 : 1;
-    this.camYaw -= dx * sens;
-    this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * sens * ySign, -0.45, 1.05);
+    let nextYaw = this.camYaw - dx * sens;
+    if (nextYaw > Math.PI || nextYaw < -Math.PI) {
+      nextYaw = Math.atan2(Math.sin(nextYaw), Math.cos(nextYaw));
+    }
+    this.camYaw = nextYaw;
+    this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * sens * ySign, -0.55, 1.18);
+  }
+
+  private flushPendingLookInput(): void {
+    const dx = this.pendingLookDx;
+    const dy = this.pendingLookDy;
+    this.pendingLookDx = 0;
+    this.pendingLookDy = 0;
+    if (dx !== 0 || dy !== 0) {
+      this.rotateCameraByDelta(dx, dy);
+    }
+  }
+
+  private releaseDragPointerCapture(): void {
+    if (this.activeDragPointerId !== null) {
+      try {
+        this.renderer.domElement.releasePointerCapture?.(this.activeDragPointerId);
+      } catch {
+        // ignore if pointer capture was already released
+      }
+      this.activeDragPointerId = null;
+    }
+    this.isDraggingLook = false;
   }
 
   public setPhase(phase: GamePhase): void {
     this.phase = phase;
     this.needsStaticRender = true;
     this._lastCullCamZ = NaN;
+    this.pendingLookDx = 0;
+    this.pendingLookDy = 0;
     if (phase !== 'jumpscare') {
       this.resetHorrorVisualState();
     }
     if (phase === 'playing') {
       this.resetFpsTracker();
       this.lastTimeMs = performance.now();
+      this.ensureLocalPlayerVisible();
+      this.syncLocalPlayerRigTransform(this.mpLastAnimState, this.mpLastHorizSpeed);
     } else if (phase === 'paused' || phase === 'menu' || phase === 'gameover' || phase === 'victory') {
       this.sound.stopSnakeSwimmingAudio(0.12);
       this.heldKeys.clear();
@@ -1045,6 +1218,7 @@ export class PoolGameEngine {
       this.virtualMove.y = 0;
       this.virtualRun = false;
       this.virtualAutoRun = false;
+      this.releaseDragPointerCapture();
       if (document.pointerLockElement === this.renderer.domElement) {
         document.exitPointerLock();
       }
@@ -1053,8 +1227,38 @@ export class PoolGameEngine {
     this.emitHud(true);
   }
 
+  public renderImmediateReadyFrame(): void {
+    if (this.disposed || this.contextLost) return;
+    if (this.phase === 'playing') {
+      this.overlayOccluded = false;
+      const shouldShowLocal = !this.isMultiplayer || (this.mpLocalAlive && !this.mpLocalEscaped);
+      this.playerRig.setVisible(shouldShowLocal);
+      this.ensureLocalPlayerVisible();
+      this.syncLocalPlayerRigTransform(this.mpLastAnimState, this.mpLastHorizSpeed);
+      this.snapPlayCameraImmediate();
+    } else if (this.phase === 'menu') {
+      this.updateMenuCamera();
+    }
+    this.updateEnvironmentFX(0);
+    this.updateVisibilityCulling(true);
+    this.scene.updateMatrixWorld(true);
+    this.camera.updateMatrixWorld(true);
+    const gl = this.renderer.getContext() as WebGL2RenderingContext | null;
+    if (!gl || !gl.isContextLost?.()) {
+      try {
+        this.renderer.render(this.scene, this.camera);
+      } catch {
+        // ignore if WebGL context is temporarily unavailable
+      }
+    }
+    this.lastTimeMs = performance.now();
+    this.ensureLoopRunning();
+    this.emitHud(true);
+  }
+
   public startLevel(levelId: number): void {
     this.sound.unlock();
+    this.overlayOccluded = false;
     this.isMultiplayer = false;
     this.mpLocalUserId = null;
     this.mpLocalAlive = true;
@@ -1074,6 +1278,36 @@ export class PoolGameEngine {
     this.virtualRun = false;
     this.virtualAutoRun = false;
     this.loadLevel(levelId, 'playing');
+    this.renderImmediateReadyFrame();
+  }
+
+  public async prepareLevelAsync(
+    levelId: number,
+    onProgress?: (pct: number, label: string) => void
+  ): Promise<void> {
+    if (this.disposed) return;
+    onProgress?.(25, 'BUILDING POOL ARCHITECTURE...');
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve());
+      } else {
+        resolve();
+      }
+    });
+    if (this.disposed) return;
+    onProgress?.(58, 'LOADING TEXTURES & SHADERS...');
+    this.startLevel(levelId);
+    onProgress?.(88, 'RENDERING FIRST FRAME...');
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve());
+      } else {
+        resolve();
+      }
+    });
+    if (this.disposed) return;
+    this.lastTimeMs = performance.now();
+    onProgress?.(100, 'READY');
   }
 
   public startMultiplayerLevel(
@@ -1084,6 +1318,7 @@ export class PoolGameEngine {
     initialElapsedSec = 0
   ): void {
     this.sound.unlock();
+    this.overlayOccluded = false;
     this.isMultiplayer = true;
     this.mpLocalUserId = localUserId;
     this.mpLocalAlive = true;
@@ -1127,8 +1362,10 @@ export class PoolGameEngine {
       this.activeSpawn.copy(this.playerPos);
       this.playerYaw = syaw;
     }
+    this.groundPlayerOnSpawnPlatform();
     resetPlayerRigPose(this.playerRig);
     this.playerRig.setVisible(this.mpLocalAlive && !this.mpLocalEscaped);
+    this.ensureLocalPlayerVisible();
     this.syncLocalPlayerRigTransform('idle', 0);
     this.snapPlayCameraImmediate();
 
@@ -1150,8 +1387,46 @@ export class PoolGameEngine {
     this.mpLastSentY = NaN;
     this.mpLastSentZ = NaN;
     this.prewarmSceneShaders();
+    this.renderImmediateReadyFrame();
+  }
+
+  public async prepareMultiplayerLevelAsync(
+    levelId: number,
+    localUserId: string,
+    initialPlayers: PlayerNetState[],
+    initialMonsters: MonsterNetState[],
+    initialElapsedSec = 0,
+    onProgress?: (pct: number, label: string) => void
+  ): Promise<void> {
+    if (this.disposed) return;
+    onProgress?.(25, 'SYNCHRONIZING SECTOR...');
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve());
+      } else {
+        resolve();
+      }
+    });
+    if (this.disposed) return;
+    onProgress?.(60, 'SPAWNING SQUAD & SERPENTS...');
+    this.startMultiplayerLevel(
+      levelId,
+      localUserId,
+      initialPlayers,
+      initialMonsters,
+      initialElapsedSec
+    );
+    onProgress?.(90, 'RENDERING LIVE ARENA...');
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve());
+      } else {
+        resolve();
+      }
+    });
+    if (this.disposed) return;
     this.lastTimeMs = performance.now();
-    this.emitHud(true);
+    onProgress?.(100, 'READY');
   }
 
   public exitMultiplayerMode(): void {
@@ -1176,7 +1451,10 @@ export class PoolGameEngine {
     this.sound.stopSnakeSwimmingAudio(0.08);
   }
 
-  private findLocalPushCandidate() {
+  private findLocalPushCandidate(): {
+    target: { userId: string; dirX: number; dirZ: number; dist: number };
+    pushYaw: number;
+  } | null {
     if (!this.isMultiplayer || !this.mpLocalUserId || !this.mpLocalAlive || this.mpLocalBeingEaten || this.mpLocalEscaped) {
       return null;
     }
@@ -1187,8 +1465,8 @@ export class PoolGameEngine {
     for (const rp of this.remotePlayers.values()) {
       if (!rp.alive || rp.escaped || rp.pushRecoveryTimer > 0 || this.isUserBeingEaten(rp.userId)) continue;
       if (
-        Math.abs(rp.pos.x - px) > 2.65 ||
-        Math.abs(rp.pos.z - pz) > 2.65 ||
+        Math.abs(rp.pos.x - px) > 3.1 ||
+        Math.abs(rp.pos.z - pz) > 3.1 ||
         Math.abs(rp.pos.y - py) > 1.85
       ) {
         continue;
@@ -1199,18 +1477,49 @@ export class PoolGameEngine {
       _pushCandidates.push(rp.pushCand);
     }
     if (_pushCandidates.length === 0) return null;
-    return selectPushTarget(
+
+    // 1. Check character facing direction first
+    const byBodyYaw = selectPushTarget(
       this.currentLevel,
       {
         userId: this.mpLocalUserId,
-        x: this.playerPos.x,
-        y: this.playerPos.y,
-        z: this.playerPos.z,
+        x: px,
+        y: py,
+        z: pz,
         yaw: this.playerYaw,
       },
       _pushCandidates,
       this.platformTime
     );
+    if (byBodyYaw) {
+      return {
+        target: byBodyYaw,
+        pushYaw: Math.atan2(byBodyYaw.dirX, byBodyYaw.dirZ),
+      };
+    }
+
+    // 2. Fall back to camera look direction so standing still & looking at a friend works intuitively
+    const camForwardYaw = this.camYaw + Math.PI;
+    const byCamYaw = selectPushTarget(
+      this.currentLevel,
+      {
+        userId: this.mpLocalUserId,
+        x: px,
+        y: py,
+        z: pz,
+        yaw: camForwardYaw,
+      },
+      _pushCandidates,
+      this.platformTime
+    );
+    if (byCamYaw) {
+      return {
+        target: byCamYaw,
+        pushYaw: Math.atan2(byCamYaw.dirX, byCamYaw.dirZ),
+      };
+    }
+
+    return null;
   }
 
   public triggerPush(): void {
@@ -1219,17 +1528,52 @@ export class PoolGameEngine {
     }
     if (this.pushCooldownTimer > 0) return;
 
-    const candidate = this.findLocalPushCandidate();
-    if (!candidate) return;
+    const found = this.findLocalPushCandidate();
+    if (!found) {
+      // Check slightly wider range (3.5m) for moving-player network lag before rejecting
+      let nearestRp: RemotePlayerVisual | null = null;
+      let bestDist = 3.5;
+      for (const rp of this.remotePlayers.values()) {
+        if (!rp.alive || rp.escaped || rp.pushRecoveryTimer > 0 || this.isUserBeingEaten(rp.userId)) continue;
+        if (Math.abs(rp.pos.y - this.playerPos.y) > 2.0) continue;
+        const d = Math.hypot(rp.pos.x - this.playerPos.x, rp.pos.z - this.playerPos.z);
+        if (d < bestDist) {
+          bestDist = d;
+          nearestRp = rp;
+        }
+      }
+      if (!nearestRp) return;
+      const aimYaw = Math.atan2(nearestRp.pos.x - this.playerPos.x, nearestRp.pos.z - this.playerPos.z);
+      this.playerYaw = aimYaw;
+      this.playerRig.root.rotation.set(0, this.playerYaw, 0);
+      this.pushCooldownTimer = 0.42;
+      this.playerRig.pushAnimTimer = 0.34;
+      this.sound.playPush(0.75);
+      this.mpSendTimer = 1;
+      this.callbacks.onMultiplayerPush?.({
+        yaw: aimYaw,
+        x: this.playerPos.x,
+        y: this.playerPos.y,
+        z: this.playerPos.z,
+        targetUserId: nearestRp.userId,
+      });
+      this.emitHud(true);
+      return;
+    }
 
+    // Face toward the pushed friend cleanly so push animation & server direction align
+    this.playerYaw = found.pushYaw;
+    this.playerRig.root.rotation.set(0, this.playerYaw, 0);
     this.pushCooldownTimer = PUSH_COOLDOWN_MS / 1000;
     this.playerRig.pushAnimTimer = 0.38;
     this.sound.playPush(1.0);
+    this.mpSendTimer = 1;
     this.callbacks.onMultiplayerPush?.({
-      yaw: this.playerYaw,
+      yaw: found.pushYaw,
       x: this.playerPos.x,
       y: this.playerPos.y,
       z: this.playerPos.z,
+      targetUserId: found.target.userId,
     });
     this.emitHud(true);
   }
@@ -1253,6 +1597,7 @@ export class PoolGameEngine {
 
     if (ev.attackerUserId) {
       if (ev.attackerUserId === this.mpLocalUserId) {
+        this.pushCooldownTimer = Math.max(this.pushCooldownTimer, PUSH_COOLDOWN_MS / 1000);
         if (this.playerRig.pushAnimTimer <= 0.1) {
           this.playerRig.pushAnimTimer = 0.38;
         }
@@ -1260,6 +1605,7 @@ export class PoolGameEngine {
         const attackerRp = this.remotePlayers.get(ev.attackerUserId);
         if (attackerRp) {
           attackerRp.rig.pushAnimTimer = 0.38;
+          attackerRp.targetYaw = Math.atan2(dirX, dirZ);
         }
       }
     }
@@ -1272,10 +1618,11 @@ export class PoolGameEngine {
       this.grounded = false;
       this.stoodPlatform = null;
       this.coyoteTimer = 0;
-      this.pushStaggerTimer = 0.42;
+      this.pushStaggerTimer = 0.45;
       this.pushRecoveryTimer = PUSH_RECOVERY_MS / 1000;
-      this.playerRig.pushedAnimTimer = 0.45;
+      this.playerRig.pushedAnimTimer = 0.48;
       this.camShake = Math.max(this.camShake, 0.36);
+      this.mpSendTimer = 1; // Flush pushed velocity & position immediately to server
       this.sound.playPush(1.0);
       if (this.inWater) {
         this.spawnSplash(this.playerPos, 12, 1.2);
@@ -1286,7 +1633,21 @@ export class PoolGameEngine {
 
     const targetRp = this.remotePlayers.get(ev.userId);
     if (targetRp) {
-      targetRp.rig.pushedAnimTimer = 0.45;
+      // Immediately replicate knockback velocity & animation on all observers' screens
+      targetRp.velX = dirX * force;
+      targetRp.velY = liftY;
+      targetRp.velZ = dirZ * force;
+      targetRp.horizSpeed = force;
+      targetRp.animState = targetRp.inWater ? 'swim' : 'fall';
+      targetRp.lastNetTimeMs = performance.now();
+      if (Number.isFinite(ev.x) && Number.isFinite(ev.z)) {
+        targetRp.netTargetPos.set(
+          ev.x as number,
+          Number.isFinite(ev.y) ? (ev.y as number) : targetRp.netTargetPos.y,
+          ev.z as number
+        );
+      }
+      targetRp.rig.pushedAnimTimer = 0.48;
       targetRp.pushRecoveryTimer = PUSH_RECOVERY_MS / 1000;
       const dist = this.playerPos.distanceTo(targetRp.pos);
       if (dist < 18 && ev.attackerUserId !== this.mpLocalUserId) {
@@ -1634,6 +1995,7 @@ export class PoolGameEngine {
     const py = Number.isFinite(p.y) ? p.y : this.currentLevel.spawn[1];
     const pz = Number.isFinite(p.z) ? p.z : this.currentLevel.spawn[2];
     const pyaw = Number.isFinite(p.yaw) ? p.yaw : Math.PI;
+    const pSpeed = Number.isFinite(p.horizSpeed) ? p.horizSpeed : 0;
     let rp = this.remotePlayers.get(p.userId);
     if (!rp) {
       const uname = p.username || 'Player';
@@ -1645,7 +2007,7 @@ export class PoolGameEngine {
       rig.root.add(nameplate);
       rig.root.position.set(px, py, pz);
       rig.root.rotation.set(0, pyaw, 0);
-      animatePlayerRig(rig, p.animState, p.horizSpeed, this.simTime, 0.016);
+      animatePlayerRig(rig, p.animState, pSpeed, this.simTime, 0.016);
       rig.root.updateMatrixWorld(true);
       this.scene.add(rig.root);
       const created: RemotePlayerVisual = {
@@ -1665,7 +2027,7 @@ export class PoolGameEngine {
         yaw: pyaw,
         targetYaw: pyaw,
         animState: p.animState,
-        horizSpeed: p.horizSpeed,
+        horizSpeed: pSpeed,
         inWater: p.inWater,
         alive: p.alive,
         escaped: p.escaped,
@@ -1692,13 +2054,19 @@ export class PoolGameEngine {
         rp.rig = nextRig;
         rp.characterId = charId;
       }
+      const hasServerVel =
+        Number.isFinite(p.velX) && Number.isFinite(p.velY) && Number.isFinite(p.velZ);
       const netDt = (nowMs - rp.lastNetTimeMs) / 1000;
-      if (netDt > 0.015 && netDt < 0.35) {
+      if (hasServerVel) {
+        rp.velX = THREE.MathUtils.clamp(p.velX as number, -18, 18);
+        rp.velY = THREE.MathUtils.clamp(p.velY as number, -18, 18);
+        rp.velZ = THREE.MathUtils.clamp(p.velZ as number, -18, 18);
+      } else if (netDt > 0.008 && netDt < 0.5) {
         const inv = 1 / netDt;
-        rp.velX = THREE.MathUtils.clamp((px - rp.netTargetPos.x) * inv, -14, 14);
-        rp.velY = THREE.MathUtils.clamp((py - rp.netTargetPos.y) * inv, -14, 14);
-        rp.velZ = THREE.MathUtils.clamp((pz - rp.netTargetPos.z) * inv, -14, 14);
-      } else if (netDt >= 0.35) {
+        rp.velX = THREE.MathUtils.clamp((px - rp.netTargetPos.x) * inv, -18, 18);
+        rp.velY = THREE.MathUtils.clamp((py - rp.netTargetPos.y) * inv, -18, 18);
+        rp.velZ = THREE.MathUtils.clamp((pz - rp.netTargetPos.z) * inv, -18, 18);
+      } else if (netDt >= 0.5) {
         rp.velX = 0;
         rp.velY = 0;
         rp.velZ = 0;
@@ -1707,9 +2075,9 @@ export class PoolGameEngine {
       rp.netTargetPos.set(px, py, pz);
       rp.targetPos.set(px, py, pz);
     }
-    rp.targetYaw = p.yaw;
+    rp.targetYaw = pyaw;
     rp.animState = p.animState;
-    rp.horizSpeed = p.horizSpeed;
+    rp.horizSpeed = pSpeed;
     rp.inWater = p.inWater;
     rp.alive = p.alive;
     rp.escaped = p.escaped;
@@ -1721,11 +2089,10 @@ export class PoolGameEngine {
       }
     }
     if (eatingMonster) {
-      rp.rig.root.visible = !p.escaped && eatingMonster.eatingProgress < 0.995;
+      rp.rig.setVisible(!p.escaped && eatingMonster.eatingProgress < 0.995);
     } else {
       rp.rig.root.scale.setScalar(1);
-      rp.rig.root.rotation.set(0, rp.yaw, 0);
-      rp.rig.root.visible = p.alive && !p.escaped;
+      rp.rig.setVisible(p.alive && !p.escaped);
     }
   }
 
@@ -1820,11 +2187,40 @@ export class PoolGameEngine {
 
   public restartLevel(): void {
     this.sound.unlock();
+    this.overlayOccluded = false;
     this.virtualMove.x = 0;
     this.virtualMove.y = 0;
     this.virtualRun = false;
     this.virtualAutoRun = false;
     this.loadLevel(this.currentLevel.id, 'playing');
+    this.renderImmediateReadyFrame();
+  }
+
+  public async restartLevelAsync(
+    onProgress?: (pct: number, label: string) => void
+  ): Promise<void> {
+    if (this.disposed) return;
+    onProgress?.(30, 'RESETTING SECTOR...');
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve());
+      } else {
+        resolve();
+      }
+    });
+    if (this.disposed) return;
+    onProgress?.(68, 'REBUILDING SCENE...');
+    this.restartLevel();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve());
+      } else {
+        resolve();
+      }
+    });
+    if (this.disposed) return;
+    this.lastTimeMs = performance.now();
+    onProgress?.(100, 'READY');
   }
 
   public respawnAtCheckpoint(): void {
@@ -2058,8 +2454,9 @@ export class PoolGameEngine {
     this.levelGroup.add(keyLight.target);
     this.keyLight = keyLight;
 
-    // Fixed-count PointLight pool so live quality changes never recompile scene shaders
-    const poolCount = this.isSoftwareGl ? 2 : 6;
+    // Fixed-count PointLight pool sized to device capability so shaders stay lean and never recompile
+    const compactLights = this.isSoftwareGl || this.isLowEndGpu || this.isTouchDevice;
+    const poolCount = compactLights ? 2 : 4;
     for (let i = 0; i < poolCount; i++) {
       const pLight = new THREE.PointLight('#b4d0cc', i === 0 ? 1.25 : 0, 50, 1.35);
       this.levelGroup.add(pLight);
@@ -2301,9 +2698,11 @@ export class PoolGameEngine {
       });
     });
 
+    this.groundPlayerOnSpawnPlatform();
     const shouldShowLocal = nextPhase !== 'menu' && (!this.isMultiplayer || (this.mpLocalAlive && !this.mpLocalEscaped));
     resetPlayerRigPose(this.playerRig);
     this.playerRig.setVisible(shouldShowLocal);
+    this.ensureLocalPlayerVisible();
     this.syncLocalPlayerRigTransform('idle', 0);
     this.applyQualityToRenderer();
     if (nextPhase !== 'menu') {
@@ -2323,18 +2722,10 @@ export class PoolGameEngine {
     const needFullPass = !this.coreShadersWarmed || (wantComposer && !this.horrorComposerWarmed);
 
     const prevSpotInt = this.horrorSpotLight?.intensity ?? 0;
-    const prevJawInt = this.horrorJawLight?.intensity ?? 0;
-    const prevRimInt = this.horrorRimLight?.intensity ?? 0;
 
     if (this.horrorSpotLight) {
       this.horrorSpotLight.castShadow = false;
       this.horrorSpotLight.intensity = 0.01;
-    }
-    if (this.horrorJawLight) {
-      this.horrorJawLight.intensity = 0.01;
-    }
-    if (this.horrorRimLight) {
-      this.horrorRimLight.intensity = 0.01;
     }
 
     if (!needFullPass) {
@@ -2348,12 +2739,7 @@ export class PoolGameEngine {
         if (this.horrorSpotLight) {
           this.horrorSpotLight.intensity = prevSpotInt;
         }
-        if (this.horrorJawLight) {
-          this.horrorJawLight.intensity = prevJawInt;
-        }
-        if (this.horrorRimLight) {
-          this.horrorRimLight.intensity = prevRimInt;
-        }
+        this.ensureLocalPlayerVisible();
       }
       return;
     }
@@ -2436,12 +2822,6 @@ export class PoolGameEngine {
         this.horrorSpotLight.castShadow = false;
         this.horrorSpotLight.intensity = prevSpotInt;
       }
-      if (this.horrorJawLight) {
-        this.horrorJawLight.intensity = prevJawInt;
-      }
-      if (this.horrorRimLight) {
-        this.horrorRimLight.intensity = prevRimInt;
-      }
       if (this.horrorPass) {
         this.horrorPass.uniforms.uIntensity.value = 0;
         this.horrorPass.uniforms.uMotionBlur.value = 0;
@@ -2459,9 +2839,7 @@ export class PoolGameEngine {
       for (let i = 0; i < savedVisibility.length; i++) {
         savedVisibility[i].obj.visible = savedVisibility[i].visible;
       }
-      if (this.phase === 'playing' && (!this.isMultiplayer || (this.mpLocalAlive && !this.mpLocalEscaped))) {
-        this.playerRig.setVisible(true);
-      }
+      this.ensureLocalPlayerVisible();
       if (warmedSplash) {
         this.splashMesh.count = prevSplashCount;
       }
@@ -3441,7 +3819,7 @@ export class PoolGameEngine {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(cx, waterY, cz);
-    mesh.receiveShadow = true;
+    mesh.receiveShadow = !this.isSoftwareGl && !this.isTouchDevice && this.activeQuality !== 'smooth';
     mesh.renderOrder = 2;
     this.levelGroup.add(mesh);
 
@@ -4124,6 +4502,9 @@ export class PoolGameEngine {
     this.playerYaw = Math.PI;
     this.camYaw = 0;
     this.camPitch = 0.25;
+    this.camDist = 5.0;
+    this.pendingLookDx = 0;
+    this.pendingLookDy = 0;
     this.grounded = false;
     this.stoodPlatform = null;
     this.inWater = false;
@@ -4136,10 +4517,14 @@ export class PoolGameEngine {
     this.jumpBufferTimer = 0;
     this.stamina = 100;
     this.exhausted = false;
+    if (this.platforms.length > 0) {
+      this.groundPlayerOnSpawnPlatform();
+    }
     resetPlayerRigPose(this.playerRig);
     const shouldShowLocal =
       this.phase !== 'menu' && (!this.isMultiplayer || (this.mpLocalAlive && !this.mpLocalEscaped));
     this.playerRig.setVisible(shouldShowLocal);
+    this.ensureLocalPlayerVisible();
     this.syncLocalPlayerRigTransform('idle', 0);
     if (this.phase !== 'menu') {
       this.snapPlayCameraImmediate();
@@ -4375,15 +4760,12 @@ export class PoolGameEngine {
       }
     }
 
-    // Animate water surface & splash particles
-    this.updateEnvironmentFX(dt);
-    this.updateSplashParticles(dt);
-
     if (this.phase === 'menu') {
       this.updateMenuCamera();
       this.updateMonsters(dt, false);
       this.sound.updateAtmosphere(this.simTime, 30, 'calm', false, false, false);
     } else if (this.phase === 'playing') {
+      this.flushPendingLookInput();
       this.levelTimeElapsed += dt;
       if (this.isMultiplayer) {
         this.updatePlatforms(dt);
@@ -4398,24 +4780,30 @@ export class PoolGameEngine {
 
         if (this.mpLocalAlive && !this.mpLocalBeingEaten) {
           this.mpSendTimer += dt;
-          if (this.mpSendTimer >= 0.045) {
+          const urgentTransition =
+            this.mpLastAnimState !== this.mpLastSentAnim ||
+            this.inWater !== this.mpLastSentInWater ||
+            this.activeCheckpointIndex !== this.mpLastSentCp ||
+            this.localCharacterId !== this.mpLastSentCharacter ||
+            this.mpLocalEscaped;
+          if (urgentTransition || this.mpSendTimer >= 0.04) {
             this.mpSendTimer = 0;
             const qx = Math.round(this.playerPos.x * 1000) / 1000;
             const qy = Math.round(this.playerPos.y * 1000) / 1000;
             const qz = Math.round(this.playerPos.z * 1000) / 1000;
             const qyaw = Math.round(this.playerYaw * 1000) / 1000;
             const qspd = Math.round(this.mpLastHorizSpeed * 100) / 100;
+            const qvx = Math.round(this.playerVel.x * 100) / 100;
+            const qvy = Math.round(this.playerVel.y * 100) / 100;
+            const qvz = Math.round(this.playerVel.z * 100) / 100;
             const changed =
+              urgentTransition ||
               qx !== this.mpLastSentX ||
               qy !== this.mpLastSentY ||
               qz !== this.mpLastSentZ ||
               Math.abs(shortestAngleDiff(this.mpLastSentYaw, qyaw)) > 0.004 ||
-              this.mpLastAnimState !== this.mpLastSentAnim ||
-              this.inWater !== this.mpLastSentInWater ||
-              this.activeCheckpointIndex !== this.mpLastSentCp ||
-              this.localCharacterId !== this.mpLastSentCharacter ||
-              this.mpLocalEscaped;
-            if (changed || nowMs - this.mpLastSentTime >= 750) {
+              this.pushStaggerTimer > 0;
+            if (changed || nowMs - this.mpLastSentTime >= 250) {
               this.mpLastSentTime = nowMs;
               this.mpLastSentX = qx;
               this.mpLastSentY = qy;
@@ -4432,6 +4820,9 @@ export class PoolGameEngine {
                 yaw: qyaw,
                 animState: this.mpLastAnimState,
                 horizSpeed: qspd,
+                velX: qvx,
+                velY: qvy,
+                velZ: qvz,
                 inWater: this.inWater,
                 checkpointIndex: this.activeCheckpointIndex,
                 escaped: this.mpLocalEscaped,
@@ -4476,6 +4867,11 @@ export class PoolGameEngine {
     if (this.phase !== 'jumpscare' && this.horrorVisualActive) {
       this.resetHorrorVisualState();
     }
+
+    // Run environment lighting, fog, dust, shadow-frustum tracking & splash particles
+    // AFTER player physics and camera updates so they never lag 1 frame behind jumps/camera motion
+    this.updateEnvironmentFX(dt);
+    this.updateSplashParticles(dt);
 
     this.updateVisibilityCulling();
     this.syncAudioListener();
@@ -5563,8 +5959,8 @@ export class PoolGameEngine {
     this.wasInWater = this.inWater;
     this.inWater =
       !this.grounded &&
-      this.playerPos.y < waterY - 0.06 &&
-      (this.waterJumpTimer <= 0 || this.playerVel.y < 0);
+      this.playerPos.y < waterY - 0.05 &&
+      (this.waterJumpTimer <= 0 || this.playerVel.y <= 0.1);
     if (this.inWater) {
       if (!this.playerInWaterSession) {
         this.playerInWaterSession = true;
@@ -5574,6 +5970,12 @@ export class PoolGameEngine {
         this.sound.playLand(true);
         this.spawnSplash(this.playerPos, 14, 1.3);
         this.camShake = Math.max(this.camShake, 0.25);
+      }
+    } else if (!this.grounded && this.playerPos.y < waterY - 0.05) {
+      // Mid water-jump arc while still below surface: retain active water session so snake keeps chasing
+      if (!this.playerInWaterSession) {
+        this.playerInWaterSession = true;
+        this.playerWaterEpoch++;
       }
     } else if (
       this.playerInWaterSession &&
@@ -5611,12 +6013,7 @@ export class PoolGameEngine {
 
     this.mpLastAnimState = animState;
     this.mpLastHorizSpeed = horizSpeed;
-    if (!Number.isFinite(this.playerPos.x) || !Number.isFinite(this.playerPos.y) || !Number.isFinite(this.playerPos.z)) {
-      this.playerPos.copy(this.activeSpawn);
-      this.playerVel.set(0, 0, 0);
-    }
-    this.playerRig.setVisible(true);
-    this.playerRig.root.scale.setScalar(1);
+    this.ensureLocalPlayerVisible();
     this.playerRig.root.position.copy(this.playerPos);
     this.playerRig.root.rotation.set(0, this.playerYaw, 0);
     animatePlayerRig(this.playerRig, animState, horizSpeed, this.simTime, dt);
@@ -5641,9 +6038,11 @@ export class PoolGameEngine {
         continue;
       }
       if (!rp.alive || rp.escaped) continue;
+      const prevX = rp.pos.x;
+      const prevZ = rp.pos.z;
       const netAge = (nowMs - rp.lastNetTimeMs) / 1000;
-      if (netAge >= 0 && netAge < 0.14) {
-        const effT = netAge * (1 - netAge / 0.28);
+      if (netAge >= 0 && netAge < 0.26) {
+        const effT = netAge * (1 - netAge / 0.52);
         rp.targetPos.set(
           rp.netTargetPos.x + rp.velX * effT,
           rp.netTargetPos.y + rp.velY * effT,
@@ -5661,6 +6060,12 @@ export class PoolGameEngine {
         rp.pos.lerp(rp.targetPos, k);
       }
       rp.yaw += shortestAngleDiff(rp.yaw, rp.targetYaw) * k;
+      const dispSpeed = dt > 1e-4 ? Math.hypot(rp.pos.x - prevX, rp.pos.z - prevZ) / dt : 0;
+      let effAnim = rp.animState;
+      let effSpeed = Math.max(rp.horizSpeed, dispSpeed);
+      if (effAnim === 'idle' && effSpeed > 0.45) {
+        effAnim = rp.inWater ? 'swim' : effSpeed > 6.2 ? 'run' : 'walk';
+      }
       const rdx = rp.pos.x - camX;
       const rdz = rp.pos.z - camZ;
       const distSq = rdx * rdx + rdz * rdz;
@@ -5672,10 +6077,10 @@ export class PoolGameEngine {
       if (throttleDistant && distSq > 38 * 38) {
         const step = distSq > 85 * 85 ? 4 : 2;
         if ((this.renderFrameIdx + rpIdx) % step === 0) {
-          animatePlayerRig(rp.rig, rp.animState, rp.horizSpeed, this.simTime, dt * step);
+          animatePlayerRig(rp.rig, effAnim, effSpeed, this.simTime, dt * step);
         }
       } else {
-        animatePlayerRig(rp.rig, rp.animState, rp.horizSpeed, this.simTime, dt);
+        animatePlayerRig(rp.rig, effAnim, effSpeed, this.simTime, dt);
       }
     }
     this.canPushTargetCache =
@@ -6287,7 +6692,7 @@ export class PoolGameEngine {
     }
 
     // Trigger platform-edge intimidation when player climbs onto a floating platform after being in water
-    if (justClimbedPlatform && this.stoodPlatform) {
+    if (justClimbedPlatform && !playerInWater && this.stoodPlatform) {
       let primaryIdx = -1;
       let bestPursuingDist = Infinity;
       for (let i = 0; i < this.monsters.length; i++) {
@@ -6413,9 +6818,10 @@ export class PoolGameEngine {
       const holdingJumpArc =
         canAttack &&
         !this.inWater &&
+        !this.grounded &&
         this.playerInWaterSession &&
-        m.alert === 'chasing' &&
         m.intimidationPhase === 'none' &&
+        (m.alert === 'chasing' || distToPlayer <= m.waterDetectionRadius || i === closestMonsterIdx) &&
         this.playerWaterEpoch > m.safeEpoch;
 
       const extremeChaseSpeed = Math.max(48.0, m.chaseSpeed * 7.2);
@@ -6609,10 +7015,24 @@ export class PoolGameEngine {
         m.intimidationPhase === 'rising' ||
         m.intimidationPhase === 'staring' ||
         m.intimidationPhase === 'lowering';
-      const minSafeY = bBounds.floorY + 0.78 * m.scale;
-      const deepDiveY = Math.max(minSafeY, waterY - 1.95 * m.scale);
-      const diveBotY = deepDiveY - 0.68 * m.scale;
-      const diveTopY = deepDiveY + 0.68 * m.scale;
+      const minSafeY = bBounds.floorY + 0.55 * m.scale;
+      let lowestNearbyPlatBottom = waterY - 0.35;
+      for (let pi = 0; pi < _nearPlatforms.length; pi++) {
+        const plat = _nearPlatforms[pi];
+        if (!plat || plat.state === 'gone') continue;
+        const platBot = plat.currentPos.y - plat.def.size[1] * 0.5;
+        if (platBot <= waterY + 0.6 && platBot > bBounds.floorY + 0.8 && platBot < lowestNearbyPlatBottom) {
+          lowestNearbyPlatBottom = platBot;
+        }
+      }
+      const deepDiveY = THREE.MathUtils.clamp(
+        Math.min(waterY - 2.05 * m.scale, lowestNearbyPlatBottom - 0.62 * m.scale),
+        minSafeY,
+        waterY - 1.15 * m.scale
+      );
+      const diveHalfH = 0.5 * m.scale;
+      const diveBotY = deepDiveY - diveHalfH;
+      const diveTopY = deepDiveY + diveHalfH;
       const allowDive =
         !isMooredIntim &&
         (m.intimidationPhase === 'none' ||
@@ -6639,9 +7059,9 @@ export class PoolGameEngine {
           const invD = 1 / dTgt;
           const dirX = (tx - nav.x) * invD;
           const dirZ = (tz - nav.z) * invD;
-          const maxProbe = Math.min(dTgt, useFastSteer ? 15.0 : 9.0);
-          const stepLen = Math.max(1.2, monsterRadius * 1.65);
-          for (let d = 0.5; d <= maxProbe; d += stepLen) {
+          const maxProbe = Math.min(dTgt, useFastSteer ? 18.0 : 9.0);
+          const stepLen = Math.max(1.0, monsterRadius * 1.45);
+          for (let d = 0.45; d <= maxProbe; d += stepLen) {
             const sx = nav.x + dirX * d;
             const sz = nav.z + dirZ * d;
             if (this.isCircleBlocked(sx, sz, monsterRadius * 0.9, diveBotY, diveTopY, _emptyPlatforms, _nearWalls)) {
@@ -6651,13 +7071,13 @@ export class PoolGameEngine {
               this.isCircleBlocked(
                 sx,
                 sz,
-                monsterRadius * 0.98,
-                waterY - 0.9 * m.scale,
+                monsterRadius * 1.02,
+                waterY - 1.05 * m.scale,
                 waterY + 1.05 * m.scale,
                 _nearPlatforms,
                 _emptyWalls
               ) &&
-              !this.isCircleBlocked(sx, sz, monsterRadius * 0.92, diveBotY, diveTopY, _nearPlatforms, _emptyWalls)
+              !this.isCircleBlocked(sx, sz, monsterRadius * 0.86, diveBotY, diveTopY, _nearPlatforms, _emptyWalls)
             ) {
               corridorPlatformBlocked = true;
               break;
@@ -6671,23 +7091,23 @@ export class PoolGameEngine {
             this.isCircleBlocked(
               fwdX,
               fwdZ,
-              monsterRadius * 0.98,
-              waterY - 0.9 * m.scale,
+              monsterRadius * 1.02,
+              waterY - 1.05 * m.scale,
               waterY + 1.05 * m.scale,
               _nearPlatforms,
               _emptyWalls
             ) &&
-            !this.isCircleBlocked(fwdX, fwdZ, monsterRadius * 0.92, diveBotY, diveTopY, _nearPlatforms, _emptyWalls)
+            !this.isCircleBlocked(fwdX, fwdZ, monsterRadius * 0.86, diveBotY, diveTopY, _nearPlatforms, _emptyWalls)
           ) {
             corridorPlatformBlocked = true;
           }
         }
       }
 
-      if (allowDive && (platformOverhead || corridorPlatformBlocked)) {
-        m.diveTimer = Math.max(m.diveTimer || 0, useFastSteer ? 0.45 : 0.75);
+      if (allowDive && (platformOverhead || corridorPlatformBlocked || (isChasing && nav.stuckTimer > 0.16))) {
+        m.diveTimer = Math.max(m.diveTimer || 0, useFastSteer ? 0.55 : 0.75);
       } else if ((m.diveTimer || 0) > 0) {
-        if (isChasing && distToPlayer < 4.8 && !platformOverhead && !corridorPlatformBlocked) {
+        if (isChasing && distToPlayer < 3.6 && !platformOverhead && !corridorPlatformBlocked) {
           m.diveTimer = 0;
         } else {
           m.diveTimer = Math.max(0, (m.diveTimer || 0) - dt);
@@ -6708,7 +7128,7 @@ export class PoolGameEngine {
         : 1;
       const subDt = dt / subSteps;
       const subResolveIters = useFastSteer && subSteps > 2 ? 1 : 2;
-      const catchDist = 2.05 * m.scale;
+      const catchDist = 2.15 * m.scale;
       let caughtDuringSubstep = false;
       const desiredY = wantDive || platformOverhead ? deepDiveY : waterY - 0.14;
       const emergedFrac =
@@ -6853,12 +7273,22 @@ export class PoolGameEngine {
 
           if (canAttack && playerInWater && isChasing && m.intimidationPhase === 'none') {
             const dSub = Math.hypot(this.playerPos.x - nav.x, this.playerPos.z - nav.z);
-            if (
-              dSub < catchDist &&
-              !this.isCircleBlocked(nav.x, nav.z, monsterRadius * 0.65, waterY - 0.4, waterY + 0.9, _nearPlatforms, _emptyWalls)
-            ) {
-              caughtDuringSubstep = true;
-              break;
+            if (dSub < catchDist) {
+              const midX = (nav.x + this.playerPos.x) * 0.5;
+              const midZ = (nav.z + this.playerPos.z) * 0.5;
+              const wallBlocking = this.isCircleBlocked(
+                midX,
+                midZ,
+                0.28,
+                Math.min(m.pos.y, this.playerPos.y) - 0.25,
+                Math.max(m.pos.y, this.playerPos.y) + 0.5,
+                _emptyPlatforms,
+                _nearWalls
+              );
+              if (!wallBlocking) {
+                caughtDuringSubstep = true;
+                break;
+              }
             }
           }
         }
@@ -7084,25 +7514,26 @@ export class PoolGameEngine {
       syncSerpentBones(m.rig, m.yaw);
     }
 
-    // Catch & Jumpscare check: ONLY possible while player's body is in water, serpent is chasing, and NOT intimidating or directly below a platform
+    // Catch & Jumpscare check: active whenever player is in water, serpent is chasing, and no solid wall blocks strike
     if (canAttack && playerInWater) {
       for (const m of this.monsters) {
         if (m.alert !== 'chasing' || m.intimidationPhase !== 'none') continue;
         const distToPlayer = Math.hypot(this.playerPos.x - m.pos.x, this.playerPos.z - m.pos.z);
-        const catchDist = 2.05 * m.scale;
+        const catchDist = 2.15 * m.scale;
         if (distToPlayer < catchDist) {
           this.populateNearbyObstacles(m.pos.x, m.pos.z, m.scale * 3 + 2);
-          if (
-            !this.isCircleBlocked(
-              m.pos.x,
-              m.pos.z,
-              0.58 * m.scale,
-              waterY - 0.4,
-              waterY + 0.9,
-              _nearPlatforms,
-              _emptyWalls
-            )
-          ) {
+          const midX = (m.pos.x + this.playerPos.x) * 0.5;
+          const midZ = (m.pos.z + this.playerPos.z) * 0.5;
+          const wallBlocking = this.isCircleBlocked(
+            midX,
+            midZ,
+            0.28,
+            Math.min(m.pos.y, this.playerPos.y) - 0.25,
+            Math.max(m.pos.y, this.playerPos.y) + 0.5,
+            _emptyPlatforms,
+            _nearWalls
+          );
+          if (!wallBlocking) {
             this.spawnSplash(this.playerPos, 40, 2.8);
             this.triggerDeath('caught', m);
             return;
@@ -7118,7 +7549,7 @@ export class PoolGameEngine {
     }
   }
 
-  private computePlayCameraGoals(outTarget: THREE.Vector3, outCamPos: THREE.Vector3): void {
+  private computePlayCameraGoals(outTarget: THREE.Vector3, outCamPos: THREE.Vector3, dt?: number): void {
     // Target local player or spectate first alive teammate if caught in multiplayer
     let focusPos = this.playerPos;
     if (this.isMultiplayer && (!this.mpLocalAlive || this.mpLocalEscaped)) {
@@ -7136,34 +7567,50 @@ export class PoolGameEngine {
     if (!Number.isFinite(this.camPitch)) this.camPitch = 0.25;
     outTarget.set(focusPos.x, focusPos.y + 1.48, focusPos.z);
 
-    const dist = this.inWater ? 4.4 : 5.0;
-    const horizDist = Math.cos(this.camPitch) * dist;
-    const vertDist = Math.sin(this.camPitch) * dist;
+    // Keep radial distance stable across brief water-jump arcs instead of jerking 4.4 <-> 5.0 mid-air
+    const desiredDist = this.inWater || this.waterJumpTimer > 0 ? 4.4 : 5.0;
+    const cosPitch = Math.cos(this.camPitch);
+    const dirX = Math.sin(this.camYaw) * cosPitch;
+    const dirY = Math.sin(this.camPitch);
+    const dirZ = Math.cos(this.camYaw) * cosPitch;
 
-    outCamPos.set(
-      outTarget.x + Math.sin(this.camYaw) * horizDist,
-      outTarget.y + vertDist,
-      outTarget.z + Math.cos(this.camYaw) * horizDist
-    );
+    const idealX = outTarget.x + dirX * desiredDist;
+    const idealY = outTarget.y + dirY * desiredDist;
+    const idealZ = outTarget.z + dirZ * desiredDist;
 
     // Exact ray-AABB / OBB slab occlusion check using spatial grid candidate walls & platforms
     const bestCamT = this.computeCameraWallOcclusion(
       outTarget.x,
       outTarget.y,
       outTarget.z,
-      outCamPos.x,
-      outCamPos.y,
-      outCamPos.z,
+      idealX,
+      idealY,
+      idealZ,
       0.35
     );
-    if (bestCamT < 1.0) {
-      const safeT = Math.max(0.06, bestCamT * 0.92 - 0.03);
-      outCamPos.set(
-        outTarget.x + (outCamPos.x - outTarget.x) * safeT,
-        outTarget.y + (outCamPos.y - outTarget.y) * safeT,
-        outTarget.z + (outCamPos.z - outTarget.z) * safeT
-      );
+    const occludedDist =
+      bestCamT < 1.0 ? desiredDist * Math.max(0.06, bestCamT * 0.94 - 0.02) : desiredDist;
+
+    // Keep horizontal/vertical rotation and player follow 100% instant (zero lag);
+    // only ease radial wall-occlusion recovery rapidly along the exact current look ray.
+    let useDist = occludedDist;
+    if (dt !== undefined && dt > 0 && Number.isFinite(this.camDist)) {
+      if (occludedDist <= this.camDist || Math.abs(occludedDist - this.camDist) < 0.015) {
+        this.camDist = occludedDist;
+      } else {
+        const recoverK = 1 - Math.exp(-28 * dt);
+        this.camDist += (occludedDist - this.camDist) * recoverK;
+      }
+      useDist = this.camDist;
+    } else {
+      this.camDist = occludedDist;
     }
+
+    outCamPos.set(
+      outTarget.x + dirX * useDist,
+      outTarget.y + dirY * useDist,
+      outTarget.z + dirZ * useDist
+    );
 
     // Clamp camera safely inside level bounds and above pool floor
     const b = this.currentLevel.bounds;
@@ -7222,19 +7669,14 @@ export class PoolGameEngine {
     this.computePlayCameraGoals(_vCamTarget, _vCamPos);
     this.camera.position.copy(_vCamPos);
     this.camera.lookAt(_vCamTarget);
+    this.camera.updateMatrixWorld();
     this.updateVisibilityCulling();
   }
 
   private updatePlayCamera(dt: number): void {
-    this.computePlayCameraGoals(_vCamTarget, _vCamPos);
-
-    // Snap immediately on large transitions (respawn, level start, distant teammate spectate)
-    if (this.camera.position.distanceToSquared(_vCamPos) > 144) {
-      this.camera.position.copy(_vCamPos);
-    } else {
-      const k = 1 - Math.exp(-16 * dt);
-      this.camera.position.lerp(_vCamPos, k);
-    }
+    this.computePlayCameraGoals(_vCamTarget, _vCamPos, dt);
+    // Apply exact 1:1 orbit position directly every frame with zero angular or vertical follow lag
+    this.camera.position.copy(_vCamPos);
 
     // Decaying camera shake from splash/monster proximity
     if (this.camShake > 0.001) {
@@ -7244,6 +7686,7 @@ export class PoolGameEngine {
     }
 
     this.camera.lookAt(_vCamTarget);
+    this.camera.updateMatrixWorld();
   }
 
   private checkExit(): void {
@@ -7356,13 +7799,16 @@ export class PoolGameEngine {
       }
     }
 
-    const platPad = wallPad * 0.72;
+    // Tight vertical platform padding prevents camera rays from falsely grazing horizontal decks
+    // when jumping off or landing on platforms, while preserving full occlusion behind solid decks.
+    const platPadXZ = wallPad * 0.65;
+    const platPadY = Math.min(0.06, wallPad * 0.22);
     for (let i = 0; i < platCount; i++) {
       const p = useGrid ? this.platforms[_camPlatIdx[i]] : this.platforms[i];
       if (!p || p.state === 'gone') continue;
-      const hw = p.def.size[0] * 0.5 + platPad;
-      const hh = p.def.size[1] * 0.5 + platPad;
-      const hd = p.def.size[2] * 0.5 + platPad;
+      const hw = p.def.size[0] * 0.5 + platPadXZ;
+      const hh = p.def.size[1] * 0.5 + platPadY;
+      const hd = p.def.size[2] * 0.5 + platPadXZ;
 
       let ox = targetX - p.currentPos.x;
       let oy = targetY - p.currentPos.y;
@@ -7554,12 +8000,13 @@ export class PoolGameEngine {
       this.keyLight.intensity = THREE.MathUtils.lerp(this.baseKeyIntensity, 0.18, b);
     }
 
-    // Dim overhead pool fixtures and inject dying-bulb strike flicker
+    // Dim remaining overhead pool fixtures and inject dying-bulb strike flicker
     const flicker =
       eatU < 0.34 && Math.sin(this.simTime * 59.0) * Math.cos(this.simTime * 37.0) > 0.35
         ? 0.04
         : 0.16;
-    for (let i = 0; i < this.pointLightPool.length; i++) {
+    const reserveStart = m ? 2 : 0;
+    for (let i = reserveStart; i < this.pointLightPool.length; i++) {
       this.pointLightPool[i].intensity *= THREE.MathUtils.lerp(1, flicker, b);
     }
 
@@ -7571,8 +8018,8 @@ export class PoolGameEngine {
       this.scene.fog.density = THREE.MathUtils.lerp(this.scene.fog.density, targetDenseFog, b * 0.9);
     }
 
-    // 3. Dedicated dramatic predator SpotLight + Crimson Mouth/Gullet Light + Cold Rim Light
-    if (m && this.horrorSpotLight && this.horrorJawLight && this.horrorRimLight) {
+    // 3. Dedicated dramatic predator SpotLight + pooled Crimson Mouth/Gullet Light + Cold Rim Light
+    if (m && this.horrorSpotLight) {
       if (!headMatrixReady) {
         m.rig.root.updateMatrixWorld(true);
         m.rig.headGroup.getWorldPosition(_vEatHeadPos);
@@ -7598,26 +8045,38 @@ export class PoolGameEngine {
         eatU < 0.22 && Math.sin(this.simTime * 48.0) > 0.65 ? 11.5 : 19.5;
       this.horrorSpotLight.intensity = spotFlicker * b;
 
-      // Visceral internal crimson glow illuminating wet fangs, tongue, and trapped victim from inside the jaws
-      const jawPulse1 = Math.sin(THREE.MathUtils.clamp((eatU - 0.38) / 0.24, 0, 1) * Math.PI);
-      const jawPulse2 = Math.sin(THREE.MathUtils.clamp((eatU - 0.62) / 0.24, 0, 1) * Math.PI);
-      const jawOpenAmt = 1 - THREE.MathUtils.smoothstep(eatU, 0.78, 0.98);
-      _vHorrorJawPos.set(
-        _vEatHeadPos.x + fwdX * 0.44 * m.scale,
-        _vEatHeadPos.y - 0.1 * m.scale,
-        _vEatHeadPos.z + fwdZ * 0.44 * m.scale
-      );
-      this.horrorJawLight.position.copy(_vHorrorJawPos);
-      this.horrorJawLight.intensity =
-        (3.6 * jawOpenAmt + jawPulse1 * 2.6 + jawPulse2 * 3.1 + 0.5) * b;
+      // Repurpose pointLightPool[0] for visceral internal crimson jaw glow (zero extra scene lights)
+      const jawLight = this.pointLightPool[0];
+      if (jawLight) {
+        const jawPulse1 = Math.sin(THREE.MathUtils.clamp((eatU - 0.38) / 0.24, 0, 1) * Math.PI);
+        const jawPulse2 = Math.sin(THREE.MathUtils.clamp((eatU - 0.62) / 0.24, 0, 1) * Math.PI);
+        const jawOpenAmt = 1 - THREE.MathUtils.smoothstep(eatU, 0.78, 0.98);
+        _vHorrorJawPos.set(
+          _vEatHeadPos.x + fwdX * 0.44 * m.scale,
+          _vEatHeadPos.y - 0.1 * m.scale,
+          _vEatHeadPos.z + fwdZ * 0.44 * m.scale
+        );
+        jawLight.color.set('#ff160f');
+        jawLight.distance = 9.5;
+        jawLight.decay = 1.85;
+        jawLight.position.copy(_vHorrorJawPos);
+        jawLight.intensity =
+          (3.6 * jawOpenAmt + jawPulse1 * 2.6 + jawPulse2 * 3.1 + 0.5) * b;
+      }
 
-      // Chilling cold silhouette rim behind horns & dorsal ridge
-      this.horrorRimLight.position.set(
-        _vEatHeadPos.x - fwdX * 2.6 * m.scale - sideX * 1.3 * m.scale,
-        _vEatHeadPos.y + 2.2 * m.scale,
-        _vEatHeadPos.z - fwdZ * 2.6 * m.scale - sideZ * 1.3 * m.scale
-      );
-      this.horrorRimLight.intensity = 7.5 * b;
+      // Repurpose pointLightPool[1] for cold silhouette rim behind horns & dorsal ridge
+      const rimLight = this.pointLightPool[1];
+      if (rimLight) {
+        rimLight.color.set('#4d8ea8');
+        rimLight.distance = 14;
+        rimLight.decay = 1.6;
+        rimLight.position.set(
+          _vEatHeadPos.x - fwdX * 2.6 * m.scale - sideX * 1.3 * m.scale,
+          _vEatHeadPos.y + 2.2 * m.scale,
+          _vEatHeadPos.z - fwdZ * 2.6 * m.scale - sideZ * 1.3 * m.scale
+        );
+        rimLight.intensity = 7.5 * b;
+      }
     }
 
     // Suppress invisible underwater caustics once deep devouring darkness kicks in
@@ -7657,12 +8116,13 @@ export class PoolGameEngine {
       this.horrorSpotLight.intensity = 0;
       this.horrorSpotLight.castShadow = false;
     }
-    if (this.horrorJawLight) {
-      this.horrorJawLight.intensity = 0;
+    for (let i = 0; i < Math.min(2, this.pointLightPool.length); i++) {
+      const pl = this.pointLightPool[i];
+      pl.distance = 50;
+      pl.decay = 1.35;
+      pl.intensity = 0;
     }
-    if (this.horrorRimLight) {
-      this.horrorRimLight.intensity = 0;
-    }
+    this._lastLightCamX = NaN;
     if (this.hemiLight) {
       if (this.baseHemiColor) this.hemiLight.color.copy(this.baseHemiColor);
       else this.hemiLight.color.set(this.currentLevel.ambientTint);
@@ -7730,7 +8190,9 @@ export class PoolGameEngine {
     this.virtualMove.y = 0;
     this.virtualRun = false;
     this.virtualAutoRun = false;
-    this.isDraggingLook = false;
+    this.releaseDragPointerCapture();
+    this.pendingLookDx = 0;
+    this.pendingLookDy = 0;
     this.jumpBufferTimer = 0;
     try {
       if (document.pointerLockElement === this.renderer.domElement) {
@@ -8004,57 +8466,119 @@ export class PoolGameEngine {
 
   private onWindowBlur = (): void => {
     this.heldKeys.clear();
-    this.isDraggingLook = false;
+    this.pendingLookDx = 0;
+    this.pendingLookDy = 0;
+    this.releaseDragPointerCapture();
   };
 
   private onPointerDown = (e: PointerEvent): void => {
     this.sound.unlock();
     if (this.phase !== 'playing') return;
     if (e.pointerType === 'mouse') {
+      const dom = this.renderer.domElement as HTMLCanvasElement & {
+        requestPointerLock?: (options?: { unadjustedMovement?: boolean }) => Promise<void> | void;
+      };
       this.isDraggingLook = true;
       this.lastPointerX = e.clientX;
       this.lastPointerY = e.clientY;
-      // Request pointer lock on desktop canvas click for smooth FPS/TPS mouse look
-      if (document.pointerLockElement !== this.renderer.domElement && e.button === 0) {
+      // Request raw unadjusted pointer lock on desktop canvas click for true 1:1 mouse tracking
+      if (document.pointerLockElement !== dom && e.button === 0) {
         try {
-          this.renderer.domElement.requestPointerLock?.();
+          const lockResult = dom.requestPointerLock?.({ unadjustedMovement: true });
+          if (lockResult && typeof (lockResult as Promise<void>).catch === 'function') {
+            (lockResult as Promise<void>).catch(() => {
+              try {
+                dom.requestPointerLock?.();
+              } catch {
+                // fallback to drag-look if pointer lock is blocked by iframe sandbox
+              }
+            });
+          }
         } catch {
-          // fallback to drag-look if pointer lock is blocked by iframe sandbox
+          try {
+            dom.requestPointerLock?.();
+          } catch {
+            // fallback to drag-look if pointer lock is blocked by iframe sandbox
+          }
+        }
+      }
+      if (document.pointerLockElement !== dom) {
+        this.activeDragPointerId = e.pointerId;
+        try {
+          dom.setPointerCapture?.(e.pointerId);
+        } catch {
+          // ignore if pointer capture is unavailable
         }
       }
     }
   };
 
-  private onPointerMove = (e: PointerEvent): void => {
+  private onMouseMove = (e: MouseEvent): void => {
     if (this.phase !== 'playing') return;
-    if (document.pointerLockElement === this.renderer.domElement) {
-      this.rotateCameraByDelta(e.movementX, e.movementY);
-    } else if (this.isDraggingLook && e.pointerType === 'mouse') {
-      const dx = e.clientX - this.lastPointerX;
-      const dy = e.clientY - this.lastPointerY;
-      this.lastPointerX = e.clientX;
-      this.lastPointerY = e.clientY;
-      this.rotateCameraByDelta(dx, dy);
+    if (this.isPointerLocked || document.pointerLockElement === this.renderer.domElement) {
+      const dx = e.movementX;
+      const dy = e.movementY;
+      if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+      // Ignore rare single-event Chromium cursor-warp glitch right when pointer lock engages
+      if (
+        this.pointerLockAcquiredAt > 0 &&
+        performance.now() - this.pointerLockAcquiredAt < 90 &&
+        (Math.abs(dx) > 350 || Math.abs(dy) > 350)
+      ) {
+        return;
+      }
+      this.pendingLookDx += dx;
+      this.pendingLookDy += dy;
     }
   };
 
-  private onPointerUp = (): void => {
-    this.isDraggingLook = false;
+  private onPointerMove = (e: PointerEvent): void => {
+    if (this.phase !== 'playing') return;
+    if (e.pointerType !== 'mouse' || !this.isDraggingLook) return;
+    if (this.isPointerLocked || document.pointerLockElement === this.renderer.domElement) return;
+    if (this.activeDragPointerId !== null && e.pointerId !== this.activeDragPointerId) return;
+    const dx = e.clientX - this.lastPointerX;
+    const dy = e.clientY - this.lastPointerY;
+    this.lastPointerX = e.clientX;
+    this.lastPointerY = e.clientY;
+    if (Number.isFinite(dx) && Number.isFinite(dy)) {
+      this.pendingLookDx += dx;
+      this.pendingLookDy += dy;
+    }
+  };
+
+  private onPointerUp = (e?: PointerEvent): void => {
+    if (e && this.activeDragPointerId !== null && e.pointerId !== this.activeDragPointerId) return;
+    this.releaseDragPointerCapture();
   };
 
   private onPointerLockChange = (): void => {
-    this.isPointerLocked = document.pointerLockElement === this.renderer.domElement;
+    const locked = document.pointerLockElement === this.renderer.domElement;
+    this.isPointerLocked = locked;
+    this.pendingLookDx = 0;
+    this.pendingLookDy = 0;
+    if (locked) {
+      this.pointerLockAcquiredAt = performance.now();
+      this.releaseDragPointerCapture();
+    } else {
+      this.pointerLockAcquiredAt = 0;
+    }
     this.emitHud();
   };
 
   private onResize = (): void => {
     const vp = this.getViewportSize();
+    if (vp.w === this._appliedViewportW && vp.h === this._appliedViewportH) {
+      return;
+    }
     const aspect = vp.w / vp.h;
     if (Number.isFinite(aspect) && aspect > 0) {
       this.camera.aspect = aspect;
       this.camera.updateProjectionMatrix();
     }
     this.renderer.setSize(vp.w, vp.h);
+    this._appliedViewportW = vp.w;
+    this._appliedViewportH = vp.h;
     if (this.horrorComposer) {
       this.horrorComposer.setSize(vp.w, vp.h);
     }
@@ -8068,7 +8592,9 @@ export class PoolGameEngine {
     if (hidden) {
       this.cancelScheduledTick();
       this.heldKeys.clear();
-      this.isDraggingLook = false;
+      this.pendingLookDx = 0;
+      this.pendingLookDy = 0;
+      this.releaseDragPointerCapture();
     } else if (!this.disposed && !this.contextLost) {
       this.needsStaticRender = true;
       this.lastTimeMs = performance.now();
@@ -8097,6 +8623,16 @@ export class PoolGameEngine {
     } catch {
       // ignore if WebGL context is still warming up
     }
+    // Re-upload all procedural canvas textures (level + characters + serpent) after GPU memory eviction
+    this.textures.markAllDirty?.();
+    markEntityTexturesDirty(this.textures);
+    this._appliedPixelRatio = -1;
+    this._appliedViewportW = 0;
+    this._appliedViewportH = 0;
+    this._appliedShadowEnabled = null;
+    this._appliedShadowType = null;
+    this._appliedAniso = -1;
+    this._appliedQualityTier = '';
     this.coreShadersWarmed = false;
     this.horrorShadowWarmed = false;
     this.horrorComposerWarmed = false;
@@ -8104,6 +8640,7 @@ export class PoolGameEngine {
     if (this.phase === 'playing') {
       const shouldShowLocal = !this.isMultiplayer || (this.mpLocalAlive && !this.mpLocalEscaped);
       this.playerRig.setVisible(shouldShowLocal);
+      this.ensureLocalPlayerVisible();
       this.syncLocalPlayerRigTransform(this.mpLastAnimState, this.mpLastHorizSpeed);
       this.snapPlayCameraImmediate();
     }
@@ -8153,10 +8690,13 @@ export class PoolGameEngine {
 
     const dom = this.renderer.domElement;
     dom.addEventListener('pointerdown', this.onPointerDown);
+    dom.addEventListener('lostpointercapture', this.onPointerUp);
     dom.addEventListener('webglcontextlost', this.onContextLost);
     dom.addEventListener('webglcontextrestored', this.onContextRestored);
-    window.addEventListener('pointermove', this.onPointerMove);
+    document.addEventListener('mousemove', this.onMouseMove, { passive: true });
+    window.addEventListener('pointermove', this.onPointerMove, { passive: true });
     window.addEventListener('pointerup', this.onPointerUp);
+    window.addEventListener('pointercancel', this.onPointerUp);
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => this.onResize());
       this.resizeObserver.observe(this.container);
@@ -8182,10 +8722,13 @@ export class PoolGameEngine {
 
     const dom = this.renderer.domElement;
     dom.removeEventListener('pointerdown', this.onPointerDown);
+    dom.removeEventListener('lostpointercapture', this.onPointerUp);
     dom.removeEventListener('webglcontextlost', this.onContextLost);
     dom.removeEventListener('webglcontextrestored', this.onContextRestored);
+    document.removeEventListener('mousemove', this.onMouseMove);
     window.removeEventListener('pointermove', this.onPointerMove);
     window.removeEventListener('pointerup', this.onPointerUp);
+    window.removeEventListener('pointercancel', this.onPointerUp);
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
       this.resizeObserver = null;
@@ -8214,16 +8757,6 @@ export class PoolGameEngine {
       this.horrorSpotLight.shadow.map?.dispose();
       this.horrorSpotLight.dispose();
       this.horrorSpotLight = null;
-    }
-    if (this.horrorJawLight) {
-      this.scene.remove(this.horrorJawLight);
-      this.horrorJawLight.dispose();
-      this.horrorJawLight = null;
-    }
-    if (this.horrorRimLight) {
-      this.scene.remove(this.horrorRimLight);
-      this.horrorRimLight.dispose();
-      this.horrorRimLight = null;
     }
     this.horrorPass?.dispose();
     this.horrorPass = null;

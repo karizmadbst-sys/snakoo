@@ -206,9 +206,14 @@ export function computeSerpentSteerAngle(
   const baseAngle = Math.atan2(dirX, dirZ);
 
   if (isChasing && len < 3.4) {
-    _steerAngleResult.valid = true;
-    _steerAngleResult.steerAngle = baseAngle;
-    return _steerAngleResult;
+    const shortProbe = Math.min(len * 0.6, monsterRadius * 0.85 + 0.35);
+    const sxShort = Math.sin(baseAngle);
+    const szShort = Math.cos(baseAngle);
+    if (!isBlocked(nav.x + sxShort * shortProbe, nav.z + szShort * shortProbe, monsterRadius * 0.65)) {
+      _steerAngleResult.valid = true;
+      _steerAngleResult.steerAngle = baseAngle;
+      return _steerAngleResult;
+    }
   }
 
   const bias = nav.avoidDir;

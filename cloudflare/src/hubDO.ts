@@ -30,11 +30,68 @@ export class PresenceHubDO {
   private codeToRoomId = new Map<string, string>();
   private roomStatus = new Map<string, 'lobby' | 'playing' | 'ended'>();
   private invitesByUser = new Map<string, Map<string, RoomInviteInfo>>();
+  private inputInFlight = new Set<string>();
+  private pendingInput = new Map<string, { roomId: string; packet: Record<string, unknown> }>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
     this.db = new CloudflareD1Database(env.DB);
+  }
+
+  private isSocketOpen(ws: WebSocket): boolean {
+    return ws.readyState === 1;
+  }
+
+  private waitUntilSafe(promise: Promise<unknown>): void {
+    try {
+      if (this.ctx && typeof this.ctx.waitUntil === 'function') {
+        this.ctx.waitUntil(promise.catch(() => {}));
+        return;
+      }
+    } catch {
+      // ignore in non-CF test harnesses
+    }
+    void promise.catch(() => {});
+  }
+
+  private enqueuePlayerInput(userId: string, roomId: string, packet: Record<string, unknown>): void {
+    this.pendingInput.set(userId, { roomId, packet });
+    if (this.inputInFlight.has(userId)) return;
+    this.inputInFlight.add(userId);
+    const drainPromise = (async () => {
+      try {
+        while (true) {
+          const next = this.pendingInput.get(userId);
+          if (!next) break;
+          this.pendingInput.delete(userId);
+          const currentRoom = this.userRoom.get(userId);
+          if (!currentRoom || currentRoom.roomId !== next.roomId) continue;
+          try {
+            await this.callRoomAction(next.roomId, {
+              action: 'input_state',
+              userId,
+              packet: next.packet,
+            });
+          } catch {
+            // Ignore transient input drop if room transitioned/closed
+          }
+        }
+      } finally {
+        this.inputInFlight.delete(userId);
+        // If another packet arrived right as we exited the loop, drain it immediately
+        const tail = this.pendingInput.get(userId);
+        if (tail) {
+          const currentRoom = this.userRoom.get(userId);
+          if (currentRoom && currentRoom.roomId === tail.roomId) {
+            this.enqueuePlayerInput(userId, tail.roomId, tail.packet);
+          } else {
+            this.pendingInput.delete(userId);
+          }
+        }
+      }
+    })();
+    this.waitUntilSafe(drainPromise);
   }
 
   private getRoomStub(roomId: string): DurableObjectStub {
@@ -65,7 +122,7 @@ export class PresenceHubDO {
     const raw = JSON.stringify({ event, payload });
     for (const ws of set) {
       try {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (this.isSocketOpen(ws)) {
           ws.send(raw);
         }
       } catch {
@@ -154,7 +211,7 @@ export class PresenceHubDO {
             if (!set) continue;
             for (const ws of set) {
               try {
-                if (ws.readyState === WebSocket.OPEN) {
+                if (this.isSocketOpen(ws)) {
                   ws.send(raw);
                 }
               } catch {
@@ -206,6 +263,7 @@ export class PresenceHubDO {
   }
 
   private async leaveCurrentRoom(userId: string): Promise<void> {
+    this.pendingInput.delete(userId);
     const cur = this.userRoom.get(userId);
     if (!cur) return;
     this.userRoom.delete(userId);
@@ -402,7 +460,7 @@ export class PresenceHubDO {
       status: this.getPresenceStatus(user.id),
     };
 
-    if (ws.readyState === WebSocket.OPEN) {
+    if (this.isSocketOpen(ws)) {
       ws.send(
         JSON.stringify({
           event: 'auth:ok',
@@ -442,6 +500,7 @@ export class PresenceHubDO {
       if (set.size > 0) return;
       this.socketsByUser.delete(userId);
     }
+    this.pendingInput.delete(userId);
 
     const roomInfo = this.userRoom.get(userId);
     if (roomInfo) {
@@ -544,7 +603,7 @@ export class PresenceHubDO {
         case 'game:input_state': {
           const info = this.userRoom.get(userId);
           if (!info) break;
-          await this.callRoomAction(info.roomId, { action: 'input_state', userId, packet: payload });
+          this.enqueuePlayerInput(userId, info.roomId, payload);
           break;
         }
         case 'game:push': {
@@ -596,13 +655,13 @@ export class PresenceHubDO {
 
       server.addEventListener('message', (ev) => {
         const text = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data as ArrayBuffer);
-        void this.handleWsMessage(server, text);
+        this.waitUntilSafe(this.handleWsMessage(server, text));
       });
       server.addEventListener('close', () => {
-        void this.handleDisconnectSocket(server);
+        this.waitUntilSafe(this.handleDisconnectSocket(server));
       });
       server.addEventListener('error', () => {
-        void this.handleDisconnectSocket(server);
+        this.waitUntilSafe(this.handleDisconnectSocket(server));
       });
 
       return new Response(null, { status: 101, webSocket: client });

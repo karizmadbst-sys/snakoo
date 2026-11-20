@@ -118,6 +118,9 @@ export interface PlayerNetState {
   yaw: number;
   animState: PlayerAnimSyncState;
   horizSpeed: number;
+  velX?: number;
+  velY?: number;
+  velZ?: number;
   inWater: boolean;
   alive: boolean;
   escaped: boolean;
@@ -160,7 +163,7 @@ export interface WorldSyncPayload {
 export const EAT_DURATION_MS = 2300;
 export const PUSH_COOLDOWN_MS = 2500;
 export const PUSH_RECOVERY_MS = 1800;
-export const PUSH_MAX_DISTANCE = 2.6;
+export const PUSH_MAX_DISTANCE = 2.85;
 export const PUSH_MAX_Y_DIFF = 1.8;
 export const PUSH_MIN_FACING_DOT = 0.25;
 export const PUSH_FORCE_HORIZ = 10.5;
@@ -189,6 +192,9 @@ export interface ClientPlayerInputPacket {
   yaw: number;
   animState: PlayerAnimSyncState;
   horizSpeed: number;
+  velX?: number;
+  velY?: number;
+  velZ?: number;
   inWater: boolean;
   checkpointIndex: number;
   escaped: boolean;
@@ -200,6 +206,7 @@ export interface ClientPushPacket {
   x?: number;
   y?: number;
   z?: number;
+  targetUserId?: string;
 }
 
 export type VoiceSignalKind = 'offer' | 'answer' | 'ice';

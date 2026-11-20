@@ -30,7 +30,7 @@ import {
   type RoomVoicePeerState,
   type VoiceSignalKind,
 } from '../../src/multiplayer/types.ts';
-import { selectPushTarget } from '../../src/multiplayer/pushPhysics.ts';
+import { computePushNudge, selectPushTarget } from '../../src/multiplayer/pushPhysics.ts';
 import type { DeliveryMessage, Env, RoomDeliveryBatch } from './types.ts';
 
 interface InternalRoomPlayer extends RoomPlayerInfo {
@@ -41,6 +41,9 @@ interface InternalRoomPlayer extends RoomPlayerInfo {
   yaw: number;
   animState: PlayerAnimSyncState;
   horizSpeed: number;
+  velX: number;
+  velY: number;
+  velZ: number;
   inWater: boolean;
   lastUpdateAt: number;
   lastPushAt: number;
@@ -162,7 +165,9 @@ export class GameRoomDO {
   private env: Env;
   private room: InternalRoom | null = null;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
-  private disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private disconnectDeadlines = new Map<string, number>();
+  private lastWorldBroadcastMs = 0;
+  private dirtyPlayersSinceBroadcast = false;
   private tickDeliverInFlight = false;
   private spatialGrids = new Map<number, LevelSpatialGrid>();
   private scratchPlats: number[] = [];
@@ -179,6 +184,61 @@ export class GameRoomDO {
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
+  }
+
+  private scheduleNextAlarm(delayMs = 100): void {
+    const now = Date.now();
+    let targetMs = Infinity;
+    if (this.room && this.room.status === 'playing') {
+      targetMs = now + Math.max(50, delayMs);
+    }
+    for (const deadline of this.disconnectDeadlines.values()) {
+      if (deadline < targetMs) targetMs = deadline;
+    }
+    if (!Number.isFinite(targetMs)) {
+      if (typeof this.ctx?.storage?.deleteAlarm === 'function') {
+        void this.ctx.storage.deleteAlarm().catch(() => {});
+      }
+      return;
+    }
+    if (typeof this.ctx?.storage?.setAlarm === 'function') {
+      void this.ctx.storage.setAlarm(Math.max(now + 25, targetMs)).catch(() => {});
+    }
+  }
+
+  public async alarm(): Promise<void> {
+    const now = Date.now();
+    const batch = this.createBatch();
+    let didWork = false;
+
+    // Expire any disconnected players past grace deadline
+    if (this.room && this.disconnectDeadlines.size > 0) {
+      for (const [uid, deadline] of Array.from(this.disconnectDeadlines.entries())) {
+        if (now >= deadline) {
+          this.disconnectDeadlines.delete(uid);
+          const p = this.room?.players.get(uid);
+          if (p && !p.connected) {
+            this.removePlayerInternal(uid, 'left', batch);
+            didWork = true;
+          }
+        }
+      }
+    }
+
+    if (this.room && this.room.status === 'playing') {
+      if (this.dirtyPlayersSinceBroadcast || now - this.lastWorldBroadcastMs >= 40) {
+        this.advanceRoomSimulation(this.room, now, batch, true);
+        didWork = true;
+      }
+    }
+
+    if (didWork) {
+      await this.deliverBatchAsync(batch);
+    }
+
+    if ((this.room && this.room.status === 'playing') || this.disconnectDeadlines.size > 0) {
+      this.scheduleNextAlarm(90);
+    }
   }
 
   private getLevelGrid(def: LevelDef): LevelSpatialGrid {
@@ -214,6 +274,9 @@ export class GameRoomDO {
       yaw: Math.PI,
       animState: 'idle',
       horizSpeed: 0,
+      velX: 0,
+      velY: 0,
+      velZ: 0,
       inWater: false,
       lastUpdateAt: Date.now(),
       lastPushAt: 0,
@@ -271,6 +334,9 @@ export class GameRoomDO {
           yaw: r3(p.yaw),
           animState: p.animState,
           horizSpeed: r2(p.horizSpeed),
+          velX: r2(p.velX),
+          velY: r2(p.velY),
+          velZ: r2(p.velZ),
           inWater: p.inWater,
           alive: p.alive,
           escaped: p.escaped,
@@ -288,6 +354,9 @@ export class GameRoomDO {
           yaw: r3(p.yaw),
           animState: p.animState,
           horizSpeed: r2(p.horizSpeed),
+          velX: r2(p.velX),
+          velY: r2(p.velY),
+          velZ: r2(p.velZ),
           inWater: p.inWater,
           alive: p.alive,
           escaped: p.escaped,
@@ -350,10 +419,10 @@ export class GameRoomDO {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
-    for (const timer of this.disconnectTimers.values()) {
-      clearTimeout(timer);
+    this.disconnectDeadlines.clear();
+    if (typeof this.ctx?.storage?.deleteAlarm === 'function') {
+      void this.ctx.storage.deleteAlarm().catch(() => {});
     }
-    this.disconnectTimers.clear();
   }
 
   private createBatch(): RoomDeliveryBatch {
@@ -425,11 +494,7 @@ export class GameRoomDO {
     const removed = room.players.get(userId);
     if (!removed) return;
 
-    const timer = this.disconnectTimers.get(userId);
-    if (timer) {
-      clearTimeout(timer);
-      this.disconnectTimers.delete(userId);
-    }
+    this.disconnectDeadlines.delete(userId);
 
     const wasHost = room.hostId === userId;
     room.players.delete(userId);
@@ -494,9 +559,16 @@ export class GameRoomDO {
     x: number,
     y: number,
     z: number,
-    elapsedSec = 0
+    elapsedSec = 0,
+    clientInWater = false
   ): boolean {
-    const margin = 0.45;
+    // Below the waterline is always wet — never falsely protected by a nearby low platform
+    if (y < def.bounds.waterY - 0.12) {
+      return false;
+    }
+    // When client already reports swimming in water, only reject water if clearly standing inside platform footprint
+    const margin = clientInWater ? 0.04 : 0.36;
+    const minBelowTop = clientInWater ? 0.06 : 0.16;
     this.getLevelGrid(def).queryRadius(x, z, 2.5, this.scratchPlats, null);
     for (let i = 0; i < this.scratchPlats.length; i++) {
       const plat = def.platforms[this.scratchPlats[i]];
@@ -518,16 +590,16 @@ export class GameRoomDO {
         const hh = ph * 0.5;
         const hd = pd * 0.5;
         const axis = plat.rotationAxis || 'y';
-        const rotMargin = 0.65;
+        const rotMargin = clientInWater ? 0.08 : 0.48;
         if (axis === 'y') {
           const topY = py + hh;
-          if (Math.abs(y - topY) <= 0.55) {
+          if (y >= topY - minBelowTop && y <= topY + 0.5 && y >= def.bounds.waterY - 0.06) {
             const [lx, , lz] = worldToRotatedPlatformLocal(x - px, 0, z - pz, plat, elapsedSec);
             if (Math.abs(lx) <= hw + rotMargin && Math.abs(lz) <= hd + rotMargin) {
               return true;
             }
           }
-        } else if (y >= def.bounds.waterY - 0.16) {
+        } else if (y >= def.bounds.waterY - 0.06) {
           const [lx, ly, lz] = worldToRotatedPlatformLocal(x - px, y - py, z - pz, plat, elapsedSec);
           const ox = Math.max(0, Math.abs(lx) - hw);
           const oy = Math.max(0, Math.abs(ly) - hh);
@@ -539,7 +611,7 @@ export class GameRoomDO {
         continue;
       }
       const topY = py + ph * 0.5;
-      if (Math.abs(y - topY) <= 0.4) {
+      if (y >= topY - minBelowTop && y <= topY + 0.45 && y >= def.bounds.waterY - 0.06) {
         if (plat.kind === 'moving' && plat.moveOffset) {
           const minX = Math.min(plat.position[0], plat.position[0] + plat.moveOffset[0]) - pw * 0.5 - margin;
           const maxX = Math.max(plat.position[0], plat.position[0] + plat.moveOffset[0]) + pw * 0.5 + margin;
@@ -562,8 +634,10 @@ export class GameRoomDO {
     clientInWater: boolean,
     elapsedSec = 0
   ): boolean {
-    if (this.isPlayerOnPlatform(def, x, y, z, elapsedSec)) return false;
-    return y < def.bounds.waterY - 0.06 && (clientInWater || y < def.bounds.waterY - 0.08);
+    if (y < def.bounds.waterY - 0.12) return true;
+    if (this.isPlayerOnPlatform(def, x, y, z, elapsedSec, clientInWater)) return false;
+    if (clientInWater && y <= def.bounds.waterY + 0.06) return true;
+    return y < def.bounds.waterY - 0.04;
   }
 
   private isCircleBlocked(
@@ -880,6 +954,32 @@ export class GameRoomDO {
     const claimedTargets = this.claimedTargetsScratch;
     claimedTargets.clear();
 
+    // Guarantee EVERY swimmer in water is immediately chased by the nearest available serpent,
+    // even if monster 0 is busy eating another player or across a large sector.
+    const forcedChaseByMonster = new Map<number, InternalRoomPlayer>();
+    if (aliveInWater.length > 0 && room.monsters.length > 0) {
+      const assignedMonsters = new Set<number>();
+      for (const swimmer of aliveInWater) {
+        let bestIdx = -1;
+        let bestDist = Infinity;
+        for (let mi = 0; mi < room.monsters.length; mi++) {
+          if (assignedMonsters.has(mi)) continue;
+          const mm = room.monsters[mi];
+          if (mm.eatingUntil && mm.eatingUserId && now < mm.eatingUntil) continue;
+          const d = Math.hypot(swimmer.x - mm.x, swimmer.z - mm.z);
+          if (d < bestDist) {
+            bestDist = d;
+            bestIdx = mi;
+          }
+        }
+        if (bestIdx >= 0) {
+          assignedMonsters.add(bestIdx);
+          forcedChaseByMonster.set(bestIdx, swimmer);
+          claimedTargets.add(swimmer.userId);
+        }
+      }
+    }
+
     for (let i = 0; i < room.monsters.length; i++) {
       const m = room.monsters[i];
 
@@ -924,33 +1024,36 @@ export class GameRoomDO {
         }
       }
 
-      let unclaimedTarget: InternalRoomPlayer | null = null;
-      let unclaimedDist = Infinity;
-      let anyTarget: InternalRoomPlayer | null = null;
-      let anyDist = Infinity;
-      for (const p of aliveInWater) {
-        const d = Math.hypot(p.x - m.x, p.z - m.z);
-        if (d < anyDist) {
-          anyDist = d;
-          anyTarget = p;
+      const forcedTarget = forcedChaseByMonster.get(i) || null;
+      let target: InternalRoomPlayer | null = forcedTarget;
+      let targetDist = forcedTarget ? Math.hypot(forcedTarget.x - m.x, forcedTarget.z - m.z) : Infinity;
+
+      if (!target && aliveInWater.length > 0) {
+        let unclaimedTarget: InternalRoomPlayer | null = null;
+        let unclaimedDist = Infinity;
+        let anyTarget: InternalRoomPlayer | null = null;
+        let anyDist = Infinity;
+        for (const p of aliveInWater) {
+          const d = Math.hypot(p.x - m.x, p.z - m.z);
+          if (d < anyDist) {
+            anyDist = d;
+            anyTarget = p;
+          }
+          if (!claimedTargets.has(p.userId) && d < unclaimedDist) {
+            unclaimedDist = d;
+            unclaimedTarget = p;
+          }
         }
-        if (!claimedTargets.has(p.userId) && d < unclaimedDist) {
-          unclaimedDist = d;
-          unclaimedTarget = p;
+        if (unclaimedTarget && unclaimedDist <= m.waterDetectionRadius) {
+          target = unclaimedTarget;
+          targetDist = unclaimedDist;
+        } else if (anyTarget && (anyDist <= m.waterDetectionRadius || i === 0)) {
+          target = anyTarget;
+          targetDist = anyDist;
         }
       }
 
-      let target: InternalRoomPlayer | null = null;
-      let targetDist = Infinity;
-      if (unclaimedTarget && unclaimedDist <= m.waterDetectionRadius) {
-        target = unclaimedTarget;
-        targetDist = unclaimedDist;
-      } else if (anyTarget && (anyDist <= m.waterDetectionRadius || i === 0)) {
-        target = anyTarget;
-        targetDist = anyDist;
-      }
-
-      const shouldChase = Boolean(target && (targetDist <= m.waterDetectionRadius || i === 0));
+      const shouldChase = Boolean(target && (Boolean(forcedTarget) || targetDist <= m.waterDetectionRadius || i === 0));
       if (shouldChase && target) {
         claimedTargets.add(target.userId);
       }
@@ -1029,10 +1132,30 @@ export class GameRoomDO {
       }
 
       const isChasing = m.alert === 'chasing';
-      const minSafeY = def.bounds.floorY + 0.78 * m.scale;
-      const deepDiveY = Math.max(minSafeY, waterY - 1.95 * m.scale);
-      const diveBotY = deepDiveY - 0.68 * m.scale;
-      const diveTopY = deepDiveY + 0.68 * m.scale;
+      const minSafeY = def.bounds.floorY + 0.55 * m.scale;
+      let lowestNearbyPlatBottom = waterY - 0.35;
+      this.getLevelGrid(def).queryRadius(m.x, m.z, isChasing ? 16 : 10, this.scratchPlats, null);
+      for (let pi = 0; pi < this.scratchPlats.length; pi++) {
+        const plat = def.platforms[this.scratchPlats[pi]];
+        if (!plat || plat.kind === 'disappearing') continue;
+        let py = plat.position[1];
+        if (plat.kind === 'moving' && plat.moveOffset) {
+          const factor = 0.5 - 0.5 * Math.cos(elapsedSec * (plat.moveSpeed ?? 1.0) + (plat.movePhase ?? 0));
+          py += plat.moveOffset[1] * factor;
+        }
+        const platBot = py - plat.size[1] * 0.5;
+        if (platBot <= waterY + 0.6 && platBot > def.bounds.floorY + 0.8 && platBot < lowestNearbyPlatBottom) {
+          lowestNearbyPlatBottom = platBot;
+        }
+      }
+      const deepDiveY = clamp(
+        Math.min(waterY - 2.05 * m.scale, lowestNearbyPlatBottom - 0.62 * m.scale),
+        minSafeY,
+        waterY - 1.15 * m.scale
+      );
+      const diveHalfH = 0.5 * m.scale;
+      const diveBotY = deepDiveY - diveHalfH;
+      const diveTopY = deepDiveY + diveHalfH;
 
       const platformOverhead = this.isCircleBlocked(
         def,
@@ -1053,9 +1176,9 @@ export class GameRoomDO {
           const invD = 1 / dTgt;
           const dirX = (tx - m.x) * invD;
           const dirZ = (tz - m.z) * invD;
-          const maxProbe = Math.min(dTgt, isChasing ? 15.0 : 9.0);
-          const stepLen = Math.max(1.2, monsterRadius * 1.65);
-          for (let d = 0.5; d <= maxProbe; d += stepLen) {
+          const maxProbe = Math.min(dTgt, isChasing ? 18.0 : 9.0);
+          const stepLen = Math.max(1.0, monsterRadius * 1.45);
+          for (let d = 0.45; d <= maxProbe; d += stepLen) {
             const sx = m.x + dirX * d;
             const sz = m.z + dirZ * d;
             if (this.isCircleBlocked(def, sx, sz, monsterRadius * 0.9, diveBotY, diveTopY, elapsedSec, true, false)) {
@@ -1066,14 +1189,14 @@ export class GameRoomDO {
                 def,
                 sx,
                 sz,
-                monsterRadius * 0.98,
-                waterY - 0.9 * m.scale,
+                monsterRadius * 1.02,
+                waterY - 1.05 * m.scale,
                 waterY + 1.05 * m.scale,
                 elapsedSec,
                 false,
                 true
               ) &&
-              !this.isCircleBlocked(def, sx, sz, monsterRadius * 0.92, diveBotY, diveTopY, elapsedSec, false, true)
+              !this.isCircleBlocked(def, sx, sz, monsterRadius * 0.86, diveBotY, diveTopY, elapsedSec, false, true)
             ) {
               corridorPlatformBlocked = true;
               break;
@@ -1088,24 +1211,24 @@ export class GameRoomDO {
               def,
               fwdX,
               fwdZ,
-              monsterRadius * 0.98,
-              waterY - 0.9 * m.scale,
+              monsterRadius * 1.02,
+              waterY - 1.05 * m.scale,
               waterY + 1.05 * m.scale,
               elapsedSec,
               false,
               true
             ) &&
-            !this.isCircleBlocked(def, fwdX, fwdZ, monsterRadius * 0.92, diveBotY, diveTopY, elapsedSec, false, true)
+            !this.isCircleBlocked(def, fwdX, fwdZ, monsterRadius * 0.86, diveBotY, diveTopY, elapsedSec, false, true)
           ) {
             corridorPlatformBlocked = true;
           }
         }
       }
 
-      if (platformOverhead || corridorPlatformBlocked) {
-        m.diveTimer = Math.max(m.diveTimer || 0, isChasing ? 0.45 : 0.75);
+      if (platformOverhead || corridorPlatformBlocked || (isChasing && m.stuckTimer > 0.16)) {
+        m.diveTimer = Math.max(m.diveTimer || 0, isChasing ? 0.55 : 0.75);
       } else if ((m.diveTimer || 0) > 0) {
-        if (isChasing && target && targetDist < 4.8 && !platformOverhead && !corridorPlatformBlocked) {
+        if (isChasing && target && targetDist < 3.6 && !platformOverhead && !corridorPlatformBlocked) {
           m.diveTimer = 0;
         } else {
           m.diveTimer = Math.max(0, (m.diveTimer || 0) - dt);
@@ -1123,7 +1246,7 @@ export class GameRoomDO {
 
       const subSteps = isChasing ? 6 : 1;
       const subDt = dt / subSteps;
-      const catchDist = 2.05 * m.scale;
+      const catchDist = 2.15 * m.scale;
       let startedEating = false;
       const desiredY =
         wantDive || platformOverhead
@@ -1218,10 +1341,22 @@ export class GameRoomDO {
         if (isChasing) {
           for (const p of aliveInWater) {
             if (!p.alive || p.escaped || !p.inWater || (p.beingEatenUntil && now < p.beingEatenUntil)) continue;
-            if (
-              Math.hypot(p.x - m.x, p.z - m.z) < catchDist &&
-              !this.isCircleBlocked(def, m.x, m.z, monsterRadius * 0.65, waterY - 0.4, waterY + 0.9, elapsedSec, false, true)
-            ) {
+            const dToVictim = Math.hypot(p.x - m.x, p.z - m.z);
+            if (dToVictim < catchDist) {
+              const midX = (m.x + p.x) * 0.5;
+              const midZ = (m.z + p.z) * 0.5;
+              const wallBlocking = this.isCircleBlocked(
+                def,
+                midX,
+                midZ,
+                0.28,
+                Math.min(m.y, p.y) - 0.25,
+                Math.max(m.y, p.y) + 0.5,
+                elapsedSec,
+                true,
+                false
+              );
+              if (wallBlocking) continue;
               p.beingEatenUntil = now + EAT_DURATION_MS;
               p.beingEatenByMonsterId = m.id;
               m.eatingUserId = p.userId;
@@ -1347,34 +1482,54 @@ export class GameRoomDO {
     this.pushRoomBroadcast(batch, room, 'room:state', summary);
   }
 
+  private advanceRoomSimulation(
+    room: InternalRoom,
+    now: number,
+    batch: RoomDeliveryBatch,
+    forceBroadcast = false
+  ): void {
+    if (room.status !== 'playing') return;
+
+    const elapsedMs = Math.max(0, now - room.lastTickMs);
+    if (elapsedMs >= 10) {
+      const dt = Math.min(0.1, elapsedMs / 1000);
+      room.lastTickMs = now;
+      room.timeRemaining = Math.max(0, room.timeRemaining - dt);
+      this.updateRoomMonsters(room, dt, batch);
+
+      if (room.timeRemaining <= 0 && !room.matchResult) {
+        this.finalizeMatch(room, 'timeout', batch);
+      } else {
+        this.evaluateMatchResolution(room, batch);
+      }
+    }
+
+    if (forceBroadcast || this.dirtyPlayersSinceBroadcast || now - this.lastWorldBroadcastMs >= 36) {
+      this.lastWorldBroadcastMs = now;
+      this.dirtyPlayersSinceBroadcast = false;
+      this.pushRoomBroadcast(batch, room, 'game:world', {
+        roomId: room.id,
+        serverTime: now,
+        timeRemaining: r2(room.timeRemaining),
+        elapsedSec: room.matchStartTime ? r2(Math.max(0, (now - room.matchStartTime) / 1000)) : 0,
+        players: this.serializeNetPlayers(room, true),
+        monsters: this.serializeNetMonsters(room),
+        matchResult: room.matchResult,
+      });
+    }
+  }
+
   private async runTick(): Promise<void> {
     const room = this.room;
     if (!room || room.status !== 'playing') return;
     if (this.tickDeliverInFlight) return;
 
     const now = Date.now();
-    const dt = Math.min(0.1, Math.max(0.01, (now - room.lastTickMs) / 1000));
-    room.lastTickMs = now;
+    // Flush immediately if player state changed since last broadcast or 40ms elapsed
+    if (!this.dirtyPlayersSinceBroadcast && now - this.lastWorldBroadcastMs < 40) return;
 
     const batch = this.createBatch();
-    room.timeRemaining = Math.max(0, room.timeRemaining - dt);
-    this.updateRoomMonsters(room, dt, batch);
-
-    if (room.timeRemaining <= 0 && !room.matchResult) {
-      this.finalizeMatch(room, 'timeout', batch);
-    } else {
-      this.evaluateMatchResolution(room, batch);
-    }
-
-    this.pushRoomBroadcast(batch, room, 'game:world', {
-      roomId: room.id,
-      serverTime: now,
-      timeRemaining: r2(room.timeRemaining),
-      elapsedSec: room.matchStartTime ? r2(Math.max(0, (now - room.matchStartTime) / 1000)) : 0,
-      players: this.serializeNetPlayers(room, true),
-      monsters: this.serializeNetMonsters(room),
-      matchResult: room.matchResult,
-    });
+    this.advanceRoomSimulation(room, now, batch, true);
 
     this.tickDeliverInFlight = true;
     try {
@@ -1448,11 +1603,7 @@ export class GameRoomDO {
           const existing = room.players.get(user.id);
           if (existing) {
             existing.connected = true;
-            const t = this.disconnectTimers.get(user.id);
-            if (t) {
-              clearTimeout(t);
-              this.disconnectTimers.delete(user.id);
-            }
+            this.disconnectDeadlines.delete(user.id);
             const serialized = this.serializeRoom(room);
             batch.roomSummary = serialized;
             this.pushRoomBroadcast(batch, room, 'room:state', serialized);
@@ -1494,11 +1645,7 @@ export class GameRoomDO {
           const rp = room.players.get(userId);
           if (rp) {
             rp.connected = true;
-            const timer = this.disconnectTimers.get(userId);
-            if (timer) {
-              clearTimeout(timer);
-              this.disconnectTimers.delete(userId);
-            }
+            this.disconnectDeadlines.delete(userId);
             const serialized = this.serializeRoom(room);
             batch.roomSummary = serialized;
             this.pushRoomBroadcast(batch, room, 'room:state', serialized);
@@ -1549,20 +1696,8 @@ export class GameRoomDO {
               batch.roomSummary = serialized;
               this.pushRoomBroadcast(batch, room, 'room:state', serialized);
 
-              const prevTimer = this.disconnectTimers.get(userId);
-              if (prevTimer) clearTimeout(prevTimer);
-              const timer = setTimeout(() => {
-                this.disconnectTimers.delete(userId);
-                const latestRoom = this.room;
-                if (!latestRoom) return;
-                const latest = latestRoom.players.get(userId);
-                if (latest && !latest.connected) {
-                  const lateBatch = this.createBatch();
-                  this.removePlayerInternal(userId, 'left', lateBatch);
-                  void this.deliverBatchAsync(lateBatch);
-                }
-              }, this.getDisconnectGraceMs());
-              this.disconnectTimers.set(userId, timer);
+              this.disconnectDeadlines.set(userId, Date.now() + this.getDisconnectGraceMs());
+              this.scheduleNextAlarm(90);
             }
           }
           return Response.json({ batch });
@@ -1733,6 +1868,9 @@ export class GameRoomDO {
             p.yaw = Math.PI;
             p.animState = 'idle';
             p.horizSpeed = 0;
+            p.velX = 0;
+            p.velY = 0;
+            p.velZ = 0;
             p.inWater = false;
             p.alive = true;
             p.escaped = false;
@@ -1784,9 +1922,11 @@ export class GameRoomDO {
 
           if (this.tickTimer) clearInterval(this.tickTimer);
           room.lastTickMs = Date.now();
+          this.lastWorldBroadcastMs = room.lastTickMs;
           this.tickTimer = setInterval(() => {
             void this.runTick();
           }, 50);
+          this.scheduleNextAlarm(90);
 
           for (const p of room.players.values()) {
             batch.presenceChangedUserIds!.push(p.userId);
@@ -1858,6 +1998,15 @@ export class GameRoomDO {
             return Response.json({ batch });
           }
 
+          const now = Date.now();
+          const prevX = p.x;
+          const prevY = p.y;
+          const prevZ = p.z;
+          const prevYaw = p.yaw;
+          const prevAnim = p.animState;
+          const prevInWater = p.inWater;
+          const dtInput = Math.max(0.001, (now - p.lastUpdateAt) / 1000);
+
           const bounds = room.levelDef.bounds;
           p.x = clamp(packet.x, bounds.minX + 0.35, bounds.maxX - 0.35);
           p.y = clamp(packet.y, bounds.floorY, bounds.ceilingY - 0.5);
@@ -1871,8 +2020,27 @@ export class GameRoomDO {
             packet.animState === 'fall' ||
             packet.animState === 'swim';
           p.animState = validAnim ? packet.animState : 'idle';
-          p.horizSpeed = Number.isFinite(packet.horizSpeed) ? clamp(packet.horizSpeed, 0, 15) : 0;
-          const elapsedSec = room.matchStartTime ? Math.max(0, (Date.now() - room.matchStartTime) / 1000) : 0;
+          p.horizSpeed = Number.isFinite(packet.horizSpeed) ? clamp(packet.horizSpeed, 0, 18) : 0;
+
+          if (
+            Number.isFinite(packet.velX) &&
+            Number.isFinite(packet.velY) &&
+            Number.isFinite(packet.velZ)
+          ) {
+            p.velX = clamp(packet.velX as number, -18, 18);
+            p.velY = clamp(packet.velY as number, -18, 18);
+            p.velZ = clamp(packet.velZ as number, -18, 18);
+          } else if (dtInput >= 0.012 && dtInput <= 0.4) {
+            p.velX = clamp((p.x - prevX) / dtInput, -18, 18);
+            p.velY = clamp((p.y - prevY) / dtInput, -18, 18);
+            p.velZ = clamp((p.z - prevZ) / dtInput, -18, 18);
+          } else {
+            p.velX = 0;
+            p.velY = 0;
+            p.velZ = 0;
+          }
+
+          const elapsedSec = room.matchStartTime ? Math.max(0, (now - room.matchStartTime) / 1000) : 0;
           p.inWater = this.isPlayerInWaterServer(
             room.levelDef,
             p.x,
@@ -1888,11 +2056,23 @@ export class GameRoomDO {
             p.characterId = normalizeCharacterId(packet.characterId);
           }
 
+          const moved =
+            Math.abs(p.x - prevX) + Math.abs(p.y - prevY) + Math.abs(p.z - prevZ) > 0.004 ||
+            Math.abs(shortestAngleDiff(prevYaw, p.yaw)) > 0.008;
+          let urgentSync =
+            prevInWater !== p.inWater ||
+            prevAnim !== p.animState;
+
+          if (moved || urgentSync) {
+            this.dirtyPlayersSinceBroadcast = true;
+          }
+
           if (packet.escaped && !p.escaped) {
             const ex = room.levelDef.exit.position;
             const dist = Math.hypot(p.x - ex[0], p.z - ex[2]);
             if (dist <= 4.5 && Math.abs(p.y - ex[1]) <= 3.5) {
               p.escaped = true;
+              urgentSync = true;
               const ev: GamePlayerEvent = {
                 userId: p.userId,
                 username: p.username,
@@ -1903,7 +2083,13 @@ export class GameRoomDO {
             }
           }
 
-          p.lastUpdateAt = Date.now();
+          p.lastUpdateAt = now;
+          // Piggyback authoritative simulation & game:world directly on input_state responses so
+          // real-time player movement & water chases NEVER stall even if Cloudflare pauses setInterval.
+          if (urgentSync || now - this.lastWorldBroadcastMs >= 32) {
+            this.advanceRoomSimulation(room, now, batch, true);
+          }
+          this.scheduleNextAlarm(90);
           return Response.json({ batch });
         }
 
@@ -1942,7 +2128,7 @@ export class GameRoomDO {
             const px = clamp(packet.x as number, b.minX + 0.35, b.maxX - 0.35);
             const py = clamp(packet.y as number, b.floorY, b.ceilingY - 0.5);
             const pz = clamp(packet.z as number, b.minZ + 0.35, b.maxZ - 0.35);
-            if (Math.hypot(px - attacker.x, pz - attacker.z) <= 2.5 && Math.abs(py - attacker.y) <= 2.0) {
+            if (Math.hypot(px - attacker.x, pz - attacker.z) <= 3.2 && Math.abs(py - attacker.y) <= 2.2) {
               ax = px;
               ay = py;
               az = pz;
@@ -1968,7 +2154,8 @@ export class GameRoomDO {
             room.levelDef,
             { userId, x: ax, y: ay, z: az, yaw },
             candidates,
-            elapsedSec
+            elapsedSec,
+            typeof packet?.targetUserId === 'string' ? packet.targetUserId : undefined
           );
           if (!selected) {
             return Response.json({ batch });
@@ -1981,6 +2168,35 @@ export class GameRoomDO {
 
           attacker.lastPushAt = now;
           target.pushImmunityUntil = now + PUSH_RECOVERY_MS;
+
+          // Apply immediate wall-safe impulse displacement & velocity on authoritative server state
+          const nudged = computePushNudge(
+            room.levelDef,
+            target.x,
+            target.y,
+            target.z,
+            selected.dirX,
+            selected.dirZ,
+            0.38,
+            elapsedSec
+          );
+          target.x = nudged.x;
+          target.z = nudged.z;
+          target.velX = selected.dirX * PUSH_FORCE_HORIZ;
+          target.velY = PUSH_FORCE_LIFT_Y;
+          target.velZ = selected.dirZ * PUSH_FORCE_HORIZ;
+          target.horizSpeed = PUSH_FORCE_HORIZ;
+          target.animState = target.inWater ? 'swim' : 'fall';
+          target.inWater = this.isPlayerInWaterServer(
+            room.levelDef,
+            target.x,
+            target.y,
+            target.z,
+            target.inWater,
+            elapsedSec
+          );
+          target.lastUpdateAt = now;
+          this.dirtyPlayersSinceBroadcast = true;
 
           const ev: GamePlayerEvent = {
             kind: 'pushed',
@@ -1997,6 +2213,7 @@ export class GameRoomDO {
             liftY: PUSH_FORCE_LIFT_Y,
           };
           this.pushRoomBroadcast(batch, room, 'game:player_event', ev);
+          this.advanceRoomSimulation(room, now, batch, true);
           return Response.json({ batch });
         }
 

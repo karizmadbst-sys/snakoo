@@ -67,9 +67,12 @@ export const CharacterSelector: React.FC<CharacterSelectorProps> = ({
               <img
                 src={src}
                 alt={ariaLabel}
+                loading="eager"
+                decoding="sync"
                 draggable={false}
                 referrerPolicy="no-referrer"
                 className="relative z-10 w-full h-full object-cover object-center select-none transition-transform duration-200 group-hover:scale-[1.025]"
+                style={{ transform: 'translateZ(0)' }}
               />
             ) : (
               <div className="relative z-10 w-full h-full bg-gradient-to-b from-[#0b1b20] via-[#071216] to-[#050b0d]" />

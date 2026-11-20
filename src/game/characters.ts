@@ -80,12 +80,12 @@ interface CharacterTextures {
 }
 
 interface CharacterVariantPool {
-  skinMat: THREE.MeshPhysicalMaterial;
-  faceMat: THREE.MeshPhysicalMaterial;
-  lipMat: THREE.MeshPhysicalMaterial;
-  eyeMat: THREE.MeshPhysicalMaterial;
+  skinMat: THREE.MeshStandardMaterial;
+  faceMat: THREE.MeshStandardMaterial;
+  lipMat: THREE.MeshStandardMaterial;
+  eyeMat: THREE.MeshStandardMaterial;
   browLashMat: THREE.MeshStandardMaterial;
-  hairMat: THREE.MeshPhysicalMaterial;
+  hairMat: THREE.MeshStandardMaterial;
   topMat: THREE.MeshStandardMaterial;
   innerTopMat: THREE.MeshStandardMaterial;
   pantsMat: THREE.MeshStandardMaterial;
@@ -100,19 +100,11 @@ interface CharacterVariantPool {
   harnessGeo: THREE.BufferGeometry;
   beltGeo: THREE.BufferGeometry;
   buckleGeo: THREE.BufferGeometry;
-  neckGeo: THREE.BufferGeometry;
   headGeo: THREE.BufferGeometry;
-  noseGeo: THREE.BufferGeometry;
-  nostrilGeo: THREE.BufferGeometry;
-  upperLipGeo: THREE.BufferGeometry;
-  lowerLipGeo: THREE.BufferGeometry;
-  leftEarGeo: THREE.BufferGeometry;
-  rightEarGeo: THREE.BufferGeometry;
-  eyeballGeo: THREE.BufferGeometry;
-  upperEyelidGeo: THREE.BufferGeometry;
-  lowerEyelidGeo: THREE.BufferGeometry;
-  leftBrowGeo: THREE.BufferGeometry;
-  rightBrowGeo: THREE.BufferGeometry;
+  headSkinMergedGeo: THREE.BufferGeometry;
+  headBrowNostrilMergedGeo: THREE.BufferGeometry;
+  headLipsMergedGeo: THREE.BufferGeometry;
+  headEyesMergedGeo: THREE.BufferGeometry;
   hairCapGeo: THREE.BufferGeometry;
   hairTieGeo: THREE.BufferGeometry | null;
   hairLockGroups: Array<{
@@ -128,17 +120,15 @@ interface CharacterVariantPool {
     maxForwardPitch: number;
     parentIndex?: number;
   }>;
-  shoulderCapGeo: THREE.BufferGeometry;
+  upperArmTopMergedGeo: THREE.BufferGeometry;
   upperArmGeo: THREE.BufferGeometry;
-  sleeveUpperGeo: THREE.BufferGeometry;
   elbowGeo: THREE.BufferGeometry;
   forearmGeo: THREE.BufferGeometry;
   cuffGeo: THREE.BufferGeometry;
   leftHandGeo: THREE.BufferGeometry;
   rightHandGeo: THREE.BufferGeometry;
   thighGeo: THREE.BufferGeometry;
-  kneeGeo: THREE.BufferGeometry;
-  shinGeo: THREE.BufferGeometry;
+  lowerLegPantsMergedGeo: THREE.BufferGeometry;
   bootUpperGeo: THREE.BufferGeometry;
   bootSoleGeo: THREE.BufferGeometry;
   trimBandGeo: THREE.BufferGeometry;
@@ -158,6 +148,68 @@ const _trimColorTmp = new THREE.Color();
 function tagShared<T extends THREE.BufferGeometry | THREE.Material>(obj: T): T {
   obj.userData.sharedPool = true;
   return obj;
+}
+
+function finiteOr(v: number, fallback: number): number {
+  return Number.isFinite(v) ? v : fallback;
+}
+
+function safeLerp(cur: number, target: number, k: number, fallback = 0): number {
+  const c = Number.isFinite(cur) ? cur : fallback;
+  const t = Number.isFinite(target) ? target : fallback;
+  return c + (t - c) * k;
+}
+
+function bakeAndMergeStaticParts(
+  parts: Array<{
+    geo: THREE.BufferGeometry;
+    px?: number;
+    py?: number;
+    pz?: number;
+    rx?: number;
+    ry?: number;
+    rz?: number;
+  }>
+): THREE.BufferGeometry {
+  const prepared: THREE.BufferGeometry[] = [];
+  const mat = new THREE.Matrix4();
+  const pos = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  const euler = new THREE.Euler();
+  const scale = new THREE.Vector3(1, 1, 1);
+
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const g = p.geo.index ? p.geo.toNonIndexed() : p.geo.clone();
+    // Keep only position/normal/uv so all merged parts share identical attribute layout
+    for (const key of Object.keys(g.attributes)) {
+      if (key !== 'position' && key !== 'normal' && key !== 'uv') {
+        g.deleteAttribute(key);
+      }
+    }
+    if (!g.attributes.normal) {
+      g.computeVertexNormals();
+    }
+    if (!g.attributes.uv) {
+      const count = g.attributes.position.count;
+      g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+    }
+    euler.set(p.rx ?? 0, p.ry ?? 0, p.rz ?? 0, 'XYZ');
+    quat.setFromEuler(euler);
+    pos.set(p.px ?? 0, p.py ?? 0, p.pz ?? 0);
+    mat.compose(pos, quat, scale);
+    g.applyMatrix4(mat);
+    prepared.push(g);
+  }
+
+  const merged = mergeGeometries(prepared, false);
+  for (let i = 0; i < prepared.length; i++) {
+    prepared[i].dispose();
+  }
+  if (!merged) {
+    throw new Error('Failed to merge static character sub-geometries.');
+  }
+  return merged;
 }
 
 function makeCanvas(size: number): [HTMLCanvasElement, CanvasRenderingContext2D | null] {
@@ -842,6 +894,27 @@ export function setCharacterQualityTier(bundle: TextureBundle, tier: ActiveQuali
     v.leatherMat.envMapIntensity = envScale;
     v.metalMat.envMapIntensity = envScale;
   }
+}
+
+export function markCharacterTexturesDirty(bundle: TextureBundle): void {
+  const pool = characterPoolByBundle.get(bundle);
+  if (!pool) return;
+  const t = pool.textures;
+  t.maleSkinAlbedo.needsUpdate = true;
+  t.femaleSkinAlbedo.needsUpdate = true;
+  t.skinBump.needsUpdate = true;
+  t.maleFaceMap.needsUpdate = true;
+  t.femaleFaceMap.needsUpdate = true;
+  t.maleEyeMap.needsUpdate = true;
+  t.femaleEyeMap.needsUpdate = true;
+  t.maleHairMap.needsUpdate = true;
+  t.femaleHairMap.needsUpdate = true;
+  t.hairBump.needsUpdate = true;
+  t.maleShirtMap.needsUpdate = true;
+  t.femaleJacketMap.needsUpdate = true;
+  t.pantsMap.needsUpdate = true;
+  t.fabricBump.needsUpdate = true;
+  t.leatherMap.needsUpdate = true;
 }
 
 export function disposeCharacterResources(bundle: TextureBundle): void {
@@ -1955,55 +2028,42 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
     return g;
   };
 
-  // Calibrated PBR human materials (natural matte-satin skin, crisp wet eye clearcoat, woven fabric)
+  // Calibrated fast PBR human materials (MeshStandardMaterial avoids expensive physical clearcoat/sheen passes on every frame)
   const skinMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       map: isMale ? tex.maleSkinAlbedo : tex.femaleSkinAlbedo,
       bumpMap: tex.skinBump,
       bumpScale: 0.0035,
-      roughness: 0.58,
+      roughness: 0.56,
       metalness: 0.0,
-      sheen: 0.16,
-      sheenRoughness: 0.72,
-      sheenColor: new THREE.Color(isMale ? 0xf2b59a : 0xf8c3b4),
-      clearcoat: 0.05,
-      clearcoatRoughness: 0.55,
     })
   );
 
   const faceMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       map: isMale ? tex.maleFaceMap : tex.femaleFaceMap,
       bumpMap: tex.skinBump,
       bumpScale: 0.003,
-      roughness: 0.56,
+      roughness: 0.54,
       metalness: 0.0,
-      sheen: 0.18,
-      sheenRoughness: 0.7,
-      sheenColor: new THREE.Color(isMale ? 0xf2b59a : 0xf8c3b4),
-      clearcoat: 0.06,
-      clearcoatRoughness: 0.5,
     })
   );
 
   const lipMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       color: isMale ? 0x9e6058 : 0xb45c64,
-      roughness: 0.42,
-      metalness: 0.0,
-      clearcoat: 0.22,
-      clearcoatRoughness: 0.36,
+      roughness: 0.36,
+      metalness: 0.02,
     })
   );
 
-  // Solid opaque eyeball with natural wet clearcoat cornea shine (zero transparency sorting artifacts)
+  // Solid opaque eyeball with crisp wet cornea specular gleam
   const eyeMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       map: isMale ? tex.maleEyeMap : tex.femaleEyeMap,
-      roughness: 0.12,
-      metalness: 0.0,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.03,
+      roughness: 0.08,
+      metalness: 0.06,
+      envMapIntensity: 1.45,
     })
   );
 
@@ -2016,15 +2076,12 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
   );
 
   const hairMat = tagShared(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       map: isMale ? tex.maleHairMap : tex.femaleHairMap,
       bumpMap: tex.hairBump,
       bumpScale: 0.012,
       roughness: 0.36,
-      metalness: 0.04,
-      sheen: 0.48,
-      sheenRoughness: 0.32,
-      sheenColor: new THREE.Color(isMale ? 0x6b5648 : 0x9c6d52),
+      metalness: 0.06,
     })
   );
 
@@ -2387,6 +2444,51 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
   const lampBodyGeo = reg(new THREE.BoxGeometry(0.026, 0.038, 0.022));
   const lampLensGeo = reg(new THREE.CircleGeometry(0.009, 12));
 
+  // Pre-merge static same-bone same-material sub-meshes once per variant to cut draw calls ~45% with identical geometry
+  const headSkinMergedGeo = reg(
+    bakeAndMergeStaticParts([
+      { geo: neckGeo, py: -0.005 },
+      { geo: noseGeo, py: 0.145, pz: 0.098, rx: -0.14 },
+      { geo: upperEyelidGeo, px: -0.0305, py: 0.154, pz: 0.0835, ry: -0.08 },
+      { geo: lowerEyelidGeo, px: -0.0305, py: 0.154, pz: 0.0835, ry: -0.08 },
+      { geo: upperEyelidGeo, px: 0.0305, py: 0.154, pz: 0.0835, ry: 0.08 },
+      { geo: lowerEyelidGeo, px: 0.0305, py: 0.154, pz: 0.0835, ry: 0.08 },
+      { geo: leftEarGeo, px: -(isMale ? 0.085 : 0.08), py: 0.145, pz: -0.005 },
+      { geo: rightEarGeo, px: isMale ? 0.085 : 0.08, py: 0.145, pz: -0.005 },
+    ])
+  );
+  const headBrowNostrilMergedGeo = reg(
+    bakeAndMergeStaticParts([
+      { geo: nostrilGeo, py: 0.145, pz: 0.098, rx: -0.14 },
+      { geo: leftBrowGeo, px: -0.031, py: isMale ? 0.174 : 0.176, pz: isMale ? 0.1005 : 0.098, ry: -0.18 },
+      { geo: rightBrowGeo, px: 0.031, py: isMale ? 0.174 : 0.176, pz: isMale ? 0.1005 : 0.098, ry: 0.18 },
+    ])
+  );
+  const headLipsMergedGeo = reg(
+    bakeAndMergeStaticParts([
+      { geo: upperLipGeo, py: 0.105, pz: isMale ? 0.1085 : 0.1075 },
+      { geo: lowerLipGeo, py: 0.097, pz: isMale ? 0.1065 : 0.1055 },
+    ])
+  );
+  const headEyesMergedGeo = reg(
+    bakeAndMergeStaticParts([
+      { geo: eyeballGeo, px: -0.0305, py: 0.154, pz: 0.0835, ry: -0.08 },
+      { geo: eyeballGeo, px: 0.0305, py: 0.154, pz: 0.0835, ry: 0.08 },
+    ])
+  );
+  const upperArmTopMergedGeo = reg(
+    bakeAndMergeStaticParts([
+      { geo: shoulderCapGeo, py: 0.005 },
+      { geo: sleeveUpperGeo },
+    ])
+  );
+  const lowerLegPantsMergedGeo = reg(
+    bakeAndMergeStaticParts([
+      { geo: kneeGeo },
+      { geo: shinGeo },
+    ])
+  );
+
   const vp: CharacterVariantPool = {
     skinMat,
     faceMat,
@@ -2408,33 +2510,23 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
     harnessGeo,
     beltGeo,
     buckleGeo,
-    neckGeo,
     headGeo,
-    noseGeo,
-    nostrilGeo,
-    upperLipGeo,
-    lowerLipGeo,
-    leftEarGeo,
-    rightEarGeo,
-    eyeballGeo,
-    upperEyelidGeo,
-    lowerEyelidGeo,
-    leftBrowGeo,
-    rightBrowGeo,
+    headSkinMergedGeo,
+    headBrowNostrilMergedGeo,
+    headLipsMergedGeo,
+    headEyesMergedGeo,
     hairCapGeo,
     hairTieGeo,
     hairLockGroups: hairBuilt.lockGroups,
-    shoulderCapGeo,
+    upperArmTopMergedGeo,
     upperArmGeo,
-    sleeveUpperGeo,
     elbowGeo,
     forearmGeo,
     cuffGeo,
     leftHandGeo,
     rightHandGeo,
     thighGeo,
-    kneeGeo,
-    shinGeo,
+    lowerLegPantsMergedGeo,
     bootUpperGeo,
     bootSoleGeo,
     trimBandGeo,
@@ -2524,10 +2616,6 @@ export function createRealisticHumanRig(
   headGroup.position.y = 0.54;
   torso.add(headGroup);
 
-  const neck = new THREE.Mesh(pool.neckGeo, pool.skinMat);
-  neck.position.y = -0.005;
-  headGroup.add(neck);
-
   const head = new THREE.Mesh(pool.headGeo, pool.faceMat);
   head.position.y = 0.148;
   head.castShadow = true;
@@ -2535,49 +2623,11 @@ export function createRealisticHumanRig(
   primaryShadowMeshes.push(head);
   headGroup.add(head);
 
-  const nose = new THREE.Mesh(pool.noseGeo, pool.skinMat);
-  nose.position.set(0, 0.145, 0.098);
-  nose.rotation.x = -0.14;
-  headGroup.add(nose);
-
-  const nostrils = new THREE.Mesh(pool.nostrilGeo, pool.browLashMat);
-  nostrils.position.set(0, 0.145, 0.098);
-  nostrils.rotation.x = -0.14;
-  headGroup.add(nostrils);
-
-  const upperLip = new THREE.Mesh(pool.upperLipGeo, pool.lipMat);
-  upperLip.position.set(0, 0.105, isMale ? 0.1085 : 0.1075);
-  headGroup.add(upperLip);
-
-  const lowerLip = new THREE.Mesh(pool.lowerLipGeo, pool.lipMat);
-  lowerLip.position.set(0, 0.097, isMale ? 0.1065 : 0.1055);
-  headGroup.add(lowerLip);
-
-  // Left & Right Eyes (recessed cleanly inside orbital sockets), Solid Eyelids, Brows & Ears
-  for (const side of [-1, 1] as const) {
-    const eyeSocket = new THREE.Group();
-    eyeSocket.position.set(side * 0.0305, 0.154, 0.0835);
-    eyeSocket.rotation.y = side * 0.08;
-    headGroup.add(eyeSocket);
-
-    const eyeball = new THREE.Mesh(pool.eyeballGeo, pool.eyeMat);
-    eyeSocket.add(eyeball);
-
-    const upperLid = new THREE.Mesh(pool.upperEyelidGeo, pool.skinMat);
-    eyeSocket.add(upperLid);
-
-    const lowerLid = new THREE.Mesh(pool.lowerEyelidGeo, pool.skinMat);
-    eyeSocket.add(lowerLid);
-
-    const brow = new THREE.Mesh(side === -1 ? pool.leftBrowGeo : pool.rightBrowGeo, pool.browLashMat);
-    brow.position.set(side * 0.031, isMale ? 0.174 : 0.176, isMale ? 0.1005 : 0.098);
-    brow.rotation.y = side * 0.18;
-    headGroup.add(brow);
-
-    const ear = new THREE.Mesh(side === -1 ? pool.leftEarGeo : pool.rightEarGeo, pool.skinMat);
-    ear.position.set(side * (isMale ? 0.085 : 0.08), 0.145, -0.005);
-    headGroup.add(ear);
-  }
+  // Merged static head features (neck+nose+lids+ears, brows+nostrils, lips, eyeballs -> 4 draw calls instead of 15)
+  headGroup.add(new THREE.Mesh(pool.headSkinMergedGeo, pool.skinMat));
+  headGroup.add(new THREE.Mesh(pool.headBrowNostrilMergedGeo, pool.browLashMat));
+  headGroup.add(new THREE.Mesh(pool.headLipsMergedGeo, pool.lipMat));
+  headGroup.add(new THREE.Mesh(pool.headEyesMergedGeo, pool.eyeMat));
 
   // Hair cap + tie band + dynamic hair locks
   const hairCap = new THREE.Mesh(pool.hairCapGeo, pool.hairMat);
@@ -2647,14 +2697,10 @@ export function createRealisticHumanRig(
     shoulder.position.set(side * shoulderX, 0.432, 0);
     torso.add(shoulder);
 
-    const shoulderCap = new THREE.Mesh(pool.shoulderCapGeo, pool.topMat);
-    shoulderCap.position.y = 0.005;
-    shoulder.add(shoulderCap);
-
     const upperSkin = new THREE.Mesh(pool.upperArmGeo, pool.skinMat);
     shoulder.add(upperSkin);
 
-    const sleeve = new THREE.Mesh(pool.sleeveUpperGeo, pool.topMat);
+    const sleeve = new THREE.Mesh(pool.upperArmTopMergedGeo, pool.topMat);
     sleeve.castShadow = true;
     detailShadowMeshes.push(sleeve);
     shoulder.add(sleeve);
@@ -2707,10 +2753,7 @@ export function createRealisticHumanRig(
     shinJoint.position.y = -0.415; // world y = 0.455
     hipJoint.add(shinJoint);
 
-    const knee = new THREE.Mesh(pool.kneeGeo, pool.pantsMat);
-    shinJoint.add(knee);
-
-    const shin = new THREE.Mesh(pool.shinGeo, pool.pantsMat);
+    const shin = new THREE.Mesh(pool.lowerLegPantsMergedGeo, pool.pantsMat);
     shin.castShadow = true;
     shin.receiveShadow = true;
     detailShadowMeshes.push(shin);
@@ -2876,13 +2919,19 @@ function updateCharacterHairAndLamp(
   safeDt: number,
   isDead = false
 ): void {
-  const vertVel = (rig.hips.position.y - rig.prevHipsY) / safeDt;
-  const torsoPitchVel = (rig.torso.rotation.x - rig.prevTorsoX) / safeDt;
-  rig.prevHipsY = rig.hips.position.y;
-  rig.prevTorsoX = rig.torso.rotation.x;
+  const safeSpeed = finiteOr(horizSpeed, 0);
+  const safeTime = finiteOr(time, 0);
+  const hipsY = finiteOr(rig.hips.position.y, 0.92);
+  const torsoX = finiteOr(rig.torso.rotation.x, 0);
+  const prevY = finiteOr(rig.prevHipsY, hipsY);
+  const prevTX = finiteOr(rig.prevTorsoX, torsoX);
+  const vertVel = THREE.MathUtils.clamp((hipsY - prevY) / safeDt, -12, 12);
+  const torsoPitchVel = THREE.MathUtils.clamp((torsoX - prevTX) / safeDt, -12, 12);
+  rig.prevHipsY = hipsY;
+  rig.prevTorsoX = torsoX;
 
-  let goalPitch = -Math.min(0.55, horizSpeed * 0.055) - torsoPitchVel * 0.04;
-  let goalRoll = Math.sin(rig.gaitPhase) * Math.min(0.16, horizSpeed * 0.018);
+  let goalPitch = -Math.min(0.55, safeSpeed * 0.055) - torsoPitchVel * 0.04;
+  let goalRoll = Math.sin(finiteOr(rig.gaitPhase, 0)) * Math.min(0.16, safeSpeed * 0.018);
 
   if (isDead) {
     goalPitch = -0.35;
@@ -2890,33 +2939,39 @@ function updateCharacterHairAndLamp(
   } else if (state === 'jump') {
     goalPitch -= 0.14 + Math.max(0, vertVel) * 0.12;
   } else if (state === 'fall') {
-    goalPitch -= 0.62 + Math.sin(time * 13.0) * 0.12;
-    goalRoll += Math.cos(time * 9.5) * 0.16;
+    goalPitch -= 0.62 + Math.sin(safeTime * 13.0) * 0.12;
+    goalRoll += Math.cos(safeTime * 9.5) * 0.16;
   } else if (state === 'swim') {
-    goalPitch = -0.35 + Math.sin(rig.swimPhase) * 0.16;
-    goalRoll = Math.cos(rig.swimPhase * 0.85) * 0.22;
+    const sp = finiteOr(rig.swimPhase, 0);
+    goalPitch = -0.35 + Math.sin(sp) * 0.16;
+    goalRoll = Math.cos(sp * 0.85) * 0.22;
   } else if (state === 'idle') {
-    goalPitch = Math.sin(time * 1.4) * 0.022;
-    goalRoll = Math.cos(time * 0.9) * 0.018;
+    goalPitch = Math.sin(safeTime * 1.4) * 0.022;
+    goalRoll = Math.cos(safeTime * 0.9) * 0.018;
   }
+
+  rig.hairPitch = finiteOr(rig.hairPitch, 0);
+  rig.hairPitchVel = finiteOr(rig.hairPitchVel, 0);
+  rig.hairRoll = finiteOr(rig.hairRoll, 0);
+  rig.hairRollVel = finiteOr(rig.hairRollVel, 0);
 
   const springK = 54;
   const damping = 8.5;
   const pitchAcc = (goalPitch - rig.hairPitch) * springK - rig.hairPitchVel * damping;
   const rollAcc = (goalRoll - rig.hairRoll) * springK - rig.hairRollVel * damping;
-  rig.hairPitchVel += pitchAcc * safeDt;
-  rig.hairRollVel += rollAcc * safeDt;
+  rig.hairPitchVel = THREE.MathUtils.clamp(rig.hairPitchVel + pitchAcc * safeDt, -15, 15);
+  rig.hairRollVel = THREE.MathUtils.clamp(rig.hairRollVel + rollAcc * safeDt, -15, 15);
   rig.hairPitch = THREE.MathUtils.clamp(rig.hairPitch + rig.hairPitchVel * safeDt, -1.1, 0.55);
   rig.hairRoll = THREE.MathUtils.clamp(rig.hairRoll + rig.hairRollVel * safeDt, -0.45, 0.45);
 
   for (let i = 0; i < rig.hairNodes.length; i++) {
     const hn = rig.hairNodes[i];
     const wave =
-      Math.sin(time * (state === 'swim' ? 4.2 : 6.4) + hn.phaseOffset) *
-      (state === 'idle' || isDead ? 0.014 : Math.min(0.11, 0.024 + horizSpeed * 0.009));
+      Math.sin(safeTime * (state === 'swim' ? 4.2 : 6.4) + hn.phaseOffset) *
+      (state === 'idle' || isDead ? 0.014 : Math.min(0.11, 0.024 + safeSpeed * 0.009));
     const swayYaw =
-      Math.cos(time * (state === 'swim' ? 3.2 : 4.8) + hn.phaseOffset) *
-      (state === 'idle' || isDead ? 0.01 : Math.min(0.08, 0.018 + horizSpeed * 0.006)) *
+      Math.cos(safeTime * (state === 'swim' ? 3.2 : 4.8) + hn.phaseOffset) *
+      (state === 'idle' || isDead ? 0.01 : Math.min(0.08, 0.018 + safeSpeed * 0.006)) *
       Math.abs(hn.rollFactor);
     const localPitch = THREE.MathUtils.clamp(
       rig.hairPitch * hn.pitchFactor + wave,
@@ -2928,13 +2983,13 @@ function updateCharacterHairAndLamp(
     hn.group.rotation.z = hn.restRoll + rig.hairRoll * hn.rollFactor;
   }
 
-  const headBaseY = 0.09 + 0.54 * Math.cos(rig.torso.rotation.x);
-  const headBaseZ = 0.54 * Math.sin(rig.torso.rotation.x);
-  rig.lampAnchor.position.set(0, rig.hips.position.y + headBaseY, headBaseZ);
+  const headBaseY = 0.09 + 0.54 * Math.cos(torsoX);
+  const headBaseZ = 0.54 * Math.sin(torsoX);
+  rig.lampAnchor.position.set(0, hipsY + headBaseY, headBaseZ);
   rig.lampAnchor.rotation.set(
-    rig.hips.rotation.x + rig.torso.rotation.x + rig.headGroup.rotation.x,
-    rig.hips.rotation.y + rig.torso.rotation.y + rig.headGroup.rotation.y,
-    rig.hips.rotation.z + rig.torso.rotation.z
+    finiteOr(rig.hips.rotation.x, 0) + torsoX + finiteOr(rig.headGroup.rotation.x, 0),
+    finiteOr(rig.hips.rotation.y, 0) + finiteOr(rig.torso.rotation.y, 0) + finiteOr(rig.headGroup.rotation.y, 0),
+    finiteOr(rig.hips.rotation.z, 0) + finiteOr(rig.torso.rotation.z, 0)
   );
 }
 
@@ -3081,12 +3136,25 @@ export function animateHumanRig(
   dt: number,
   deathProgress = -1
 ): void {
-  if (deathProgress >= 0) {
-    animateHumanDeath(rig, deathProgress, time, dt);
+  const safeHorizSpeed = Number.isFinite(horizSpeed) ? Math.max(0, Math.min(20, horizSpeed)) : 0;
+  const safeTime = Number.isFinite(time) ? time : 0;
+  const safeDt = Math.min(0.05, Math.max(0.001, Number.isFinite(dt) ? dt : 0.016));
+  const safeDeath = Number.isFinite(deathProgress) ? deathProgress : -1;
+
+  if (safeDeath >= 0) {
+    animateHumanDeath(rig, safeDeath, safeTime, safeDt);
     return;
   }
 
-  const safeDt = Math.min(0.05, Math.max(0.001, dt));
+  // Self-heal if any accumulated phase or hip coordinate ever became non-finite
+  if (!Number.isFinite(rig.gaitPhase)) rig.gaitPhase = 0;
+  if (!Number.isFinite(rig.swimPhase)) rig.swimPhase = 0;
+  if (!Number.isFinite(rig.hips.position.y)) {
+    resetHumanRigPose(rig);
+  }
+
+  horizSpeed = safeHorizSpeed;
+  time = safeTime;
   const wasAir = rig.prevAnimState === 'jump' || rig.prevAnimState === 'fall';
   const isAir = state === 'jump' || state === 'fall';
   const isGround = state === 'idle' || state === 'walk' || state === 'run';
@@ -3407,41 +3475,42 @@ export function animateHumanRig(
     rArmZ += stagger * 0.52;
   }
 
-  rig.hips.position.x = THREE.MathUtils.lerp(rig.hips.position.x, targetHipsX, k);
-  rig.hips.position.y = THREE.MathUtils.lerp(rig.hips.position.y, targetHipsY, k);
-  rig.hips.rotation.x = THREE.MathUtils.lerp(rig.hips.rotation.x, targetHipsPitch, k);
-  rig.hips.rotation.y = THREE.MathUtils.lerp(rig.hips.rotation.y, targetHipsYaw, k);
-  rig.hips.rotation.z = THREE.MathUtils.lerp(rig.hips.rotation.z, targetHipsRoll, k);
+  rig.hips.position.x = safeLerp(rig.hips.position.x, targetHipsX, k, 0);
+  rig.hips.position.y = safeLerp(rig.hips.position.y, targetHipsY, k, 0.92);
+  rig.hips.position.z = 0;
+  rig.hips.rotation.x = safeLerp(rig.hips.rotation.x, targetHipsPitch, k, 0);
+  rig.hips.rotation.y = safeLerp(rig.hips.rotation.y, targetHipsYaw, k, 0);
+  rig.hips.rotation.z = safeLerp(rig.hips.rotation.z, targetHipsRoll, k, 0);
 
-  rig.torso.rotation.x = THREE.MathUtils.lerp(rig.torso.rotation.x, targetTorsoX, k);
-  rig.torso.rotation.y = THREE.MathUtils.lerp(rig.torso.rotation.y, targetTorsoY, k);
-  rig.torso.rotation.z = THREE.MathUtils.lerp(rig.torso.rotation.z, targetTorsoZ, k);
+  rig.torso.rotation.x = safeLerp(rig.torso.rotation.x, targetTorsoX, k, 0);
+  rig.torso.rotation.y = safeLerp(rig.torso.rotation.y, targetTorsoY, k, 0);
+  rig.torso.rotation.z = safeLerp(rig.torso.rotation.z, targetTorsoZ, k, 0);
 
-  rig.headGroup.rotation.x = THREE.MathUtils.lerp(rig.headGroup.rotation.x, targetHeadX, k);
-  rig.headGroup.rotation.y = THREE.MathUtils.lerp(rig.headGroup.rotation.y, targetHeadY, k * 0.65);
-  rig.headGroup.rotation.z = THREE.MathUtils.lerp(rig.headGroup.rotation.z, targetHeadZ, k);
+  rig.headGroup.rotation.x = safeLerp(rig.headGroup.rotation.x, targetHeadX, k, 0);
+  rig.headGroup.rotation.y = safeLerp(rig.headGroup.rotation.y, targetHeadY, k * 0.65, 0);
+  rig.headGroup.rotation.z = safeLerp(rig.headGroup.rotation.z, targetHeadZ, k, 0);
 
-  rig.leftArm.rotation.x = THREE.MathUtils.lerp(rig.leftArm.rotation.x, lArmX, k);
-  rig.leftArm.rotation.y = THREE.MathUtils.lerp(rig.leftArm.rotation.y, lArmY, k);
-  rig.leftArm.rotation.z = THREE.MathUtils.lerp(rig.leftArm.rotation.z, lArmZ, k);
-  rig.leftForearm.rotation.x = THREE.MathUtils.lerp(rig.leftForearm.rotation.x, lForeX, k);
-  rig.leftHand.rotation.x = THREE.MathUtils.lerp(rig.leftHand.rotation.x, lHandX, k);
+  rig.leftArm.rotation.x = safeLerp(rig.leftArm.rotation.x, lArmX, k, 0);
+  rig.leftArm.rotation.y = safeLerp(rig.leftArm.rotation.y, lArmY, k, 0);
+  rig.leftArm.rotation.z = safeLerp(rig.leftArm.rotation.z, lArmZ, k, -0.125);
+  rig.leftForearm.rotation.x = safeLerp(rig.leftForearm.rotation.x, lForeX, k, -0.22);
+  rig.leftHand.rotation.x = safeLerp(rig.leftHand.rotation.x, lHandX, k, 0.06);
 
-  rig.rightArm.rotation.x = THREE.MathUtils.lerp(rig.rightArm.rotation.x, rArmX, k);
-  rig.rightArm.rotation.y = THREE.MathUtils.lerp(rig.rightArm.rotation.y, rArmY, k);
-  rig.rightArm.rotation.z = THREE.MathUtils.lerp(rig.rightArm.rotation.z, rArmZ, k);
-  rig.rightForearm.rotation.x = THREE.MathUtils.lerp(rig.rightForearm.rotation.x, rForeX, k);
-  rig.rightHand.rotation.x = THREE.MathUtils.lerp(rig.rightHand.rotation.x, rHandX, k);
+  rig.rightArm.rotation.x = safeLerp(rig.rightArm.rotation.x, rArmX, k, 0);
+  rig.rightArm.rotation.y = safeLerp(rig.rightArm.rotation.y, rArmY, k, 0);
+  rig.rightArm.rotation.z = safeLerp(rig.rightArm.rotation.z, rArmZ, k, 0.125);
+  rig.rightForearm.rotation.x = safeLerp(rig.rightForearm.rotation.x, rForeX, k, -0.22);
+  rig.rightHand.rotation.x = safeLerp(rig.rightHand.rotation.x, rHandX, k, 0.06);
 
-  rig.leftLeg.rotation.x = THREE.MathUtils.lerp(rig.leftLeg.rotation.x, lLegX, k);
-  rig.leftLeg.rotation.z = THREE.MathUtils.lerp(rig.leftLeg.rotation.z, lLegZ, k);
-  rig.leftShin.rotation.x = THREE.MathUtils.lerp(rig.leftShin.rotation.x, lShinX, k);
-  rig.leftFoot.rotation.x = THREE.MathUtils.lerp(rig.leftFoot.rotation.x, lFootX, k);
+  rig.leftLeg.rotation.x = safeLerp(rig.leftLeg.rotation.x, lLegX, k, 0);
+  rig.leftLeg.rotation.z = safeLerp(rig.leftLeg.rotation.z, lLegZ, k, 0.022);
+  rig.leftShin.rotation.x = safeLerp(rig.leftShin.rotation.x, lShinX, k, 0.02);
+  rig.leftFoot.rotation.x = safeLerp(rig.leftFoot.rotation.x, lFootX, k, 0);
 
-  rig.rightLeg.rotation.x = THREE.MathUtils.lerp(rig.rightLeg.rotation.x, rLegX, k);
-  rig.rightLeg.rotation.z = THREE.MathUtils.lerp(rig.rightLeg.rotation.z, rLegZ, k);
-  rig.rightShin.rotation.x = THREE.MathUtils.lerp(rig.rightShin.rotation.x, rShinX, k);
-  rig.rightFoot.rotation.x = THREE.MathUtils.lerp(rig.rightFoot.rotation.x, rFootX, k);
+  rig.rightLeg.rotation.x = safeLerp(rig.rightLeg.rotation.x, rLegX, k, 0);
+  rig.rightLeg.rotation.z = safeLerp(rig.rightLeg.rotation.z, rLegZ, k, -0.022);
+  rig.rightShin.rotation.x = safeLerp(rig.rightShin.rotation.x, rShinX, k, 0.02);
+  rig.rightFoot.rotation.x = safeLerp(rig.rightFoot.rotation.x, rFootX, k, 0);
 
   updateCharacterHairAndLamp(rig, state, horizSpeed, time, safeDt, false);
 }

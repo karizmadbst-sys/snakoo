@@ -189,10 +189,14 @@ export const GameHud: React.FC<GameHudProps> = React.memo(
           <div className="absolute bottom-5 right-5 pointer-events-auto">
             <button
               type="button"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => {
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                e.preventDefault();
                 e.stopPropagation();
                 onPush?.();
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
               }}
               title="Push nearby friend (F)"
               className={`relative overflow-hidden px-3 py-2 rounded-xl border flex items-center gap-2 font-mono text-xs font-bold uppercase shadow-lg cursor-pointer transition-colors ${
