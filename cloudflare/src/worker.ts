@@ -128,8 +128,12 @@ export default {
 
     const db = new CloudflareD1Database(env.DB);
 
-    if (url.pathname === '/api/health' && request.method === 'GET') {
-      return jsonResponse({ ok: true, runtime: 'cloudflare-workers' }, 200, cors);
+    if ((url.pathname === '/' || url.pathname === '/api/health') && request.method === 'GET') {
+      return jsonResponse(
+        { ok: true, service: 'deep-tile-multiplayer', runtime: 'cloudflare-workers' },
+        200,
+        cors
+      );
     }
 
     if (url.pathname === '/api/auth/register' && request.method === 'POST') {

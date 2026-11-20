@@ -18,40 +18,9 @@ import type {
   WorldSyncPayload,
 } from './types';
 
+import { resolveApiUrl, resolveWsUrl } from './config';
+
 const TOKEN_STORAGE_KEY = 'deep_tile_mp_token_v1';
-
-const CONFIGURED_API_BASE = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
-const CONFIGURED_WS_BASE = (import.meta.env.VITE_WS_BASE_URL || '').trim().replace(/\/+$/, '');
-
-function resolveApiUrl(path: string): string {
-  if (!CONFIGURED_API_BASE) return path;
-  return path.startsWith('/') ? `${CONFIGURED_API_BASE}${path}` : `${CONFIGURED_API_BASE}/${path}`;
-}
-
-function resolveWsUrl(): string {
-  if (CONFIGURED_WS_BASE) {
-    try {
-      const parsed = new URL(CONFIGURED_WS_BASE);
-      if (parsed.pathname === '' || parsed.pathname === '/') {
-        parsed.pathname = '/ws';
-      }
-      return parsed.toString();
-    } catch {
-      return CONFIGURED_WS_BASE.endsWith('/ws') ? CONFIGURED_WS_BASE : `${CONFIGURED_WS_BASE}/ws`;
-    }
-  }
-  if (CONFIGURED_API_BASE) {
-    try {
-      const apiUrl = new URL(CONFIGURED_API_BASE);
-      const wsProto = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-      return `${wsProto}//${apiUrl.host}/ws`;
-    } catch {
-      // Fall back to location host below
-    }
-  }
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}/ws`;
-}
 
 export interface MultiplayerSnapshot {
   connected: boolean;
@@ -210,7 +179,11 @@ export class MultiplayerClient {
     const res = await fetch(resolveApiUrl(url), { ...init, headers });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || `Request failed (${res.status})`);
+      const error = new Error(data.error || `Request failed (${res.status})`) as Error & {
+        status?: number;
+      };
+      error.status = res.status;
+      throw error;
     }
     return data as T;
   }
@@ -222,9 +195,15 @@ export class MultiplayerClient {
       this.emitState({ user: res.user, room: res.activeRoom, error: null });
       this.connectWebSocket();
       return true;
-    } catch {
-      this.setToken(null);
-      this.emitState({ user: null, room: null, connected: false });
+    } catch (err) {
+      const status = (err as { status?: number } | null)?.status;
+      if (status === 401 || status === 403) {
+        this.setToken(null);
+        this.emitState({ user: null, room: null, connected: false });
+      } else {
+        // Keep token on transient network outage and let WebSocket auto-reconnect
+        this.connectWebSocket();
+      }
       return false;
     }
   }
