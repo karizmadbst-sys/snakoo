@@ -52,6 +52,35 @@ export const DEFAULT_SETTINGS: GameSettings = {
   touchControls: 'auto',
 };
 
+function clampFinite(val: unknown, fallback: number, min: number, max: number): number {
+  return typeof val === 'number' && Number.isFinite(val)
+    ? Math.max(min, Math.min(max, val))
+    : fallback;
+}
+
+export function sanitizeGameSettings(raw: unknown): GameSettings {
+  const src = raw && typeof raw === 'object' ? (raw as Partial<GameSettings>) : {};
+  const touch: TouchControlsMode =
+    src.touchControls === 'on' || src.touchControls === 'off' || src.touchControls === 'auto'
+      ? src.touchControls
+      : DEFAULT_SETTINGS.touchControls;
+  return {
+    masterVolume: clampFinite(src.masterVolume, DEFAULT_SETTINGS.masterVolume, 0, 1),
+    musicVolume: clampFinite(src.musicVolume, DEFAULT_SETTINGS.musicVolume, 0, 1),
+    sfxVolume: clampFinite(src.sfxVolume, DEFAULT_SETTINGS.sfxVolume, 0, 1),
+    muted: typeof src.muted === 'boolean' ? src.muted : DEFAULT_SETTINGS.muted,
+    voiceEnabled:
+      typeof src.voiceEnabled === 'boolean' ? src.voiceEnabled : DEFAULT_SETTINGS.voiceEnabled,
+    voiceVolume: clampFinite(src.voiceVolume, DEFAULT_SETTINGS.voiceVolume, 0, 1),
+    mouseSensitivity:
+      Math.round(clampFinite(src.mouseSensitivity, DEFAULT_SETTINGS.mouseSensitivity, 0.3, 2.5) * 100) /
+      100,
+    invertY: typeof src.invertY === 'boolean' ? src.invertY : DEFAULT_SETTINGS.invertY,
+    quality: normalizeQualityPreset(src.quality),
+    touchControls: touch,
+  };
+}
+
 export type TouchControlId = 'joystick' | 'autoRun' | 'jump' | 'push';
 
 export interface TouchControlPlacement {

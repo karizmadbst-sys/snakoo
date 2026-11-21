@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { getLevelSummary, LEVEL_CATALOG, SECTOR_WINGS, TOTAL_LEVELS } from '../game/levels';
 import {
+  ActiveQualityTier,
   CharacterId,
   GameSettings,
   LevelSummary,
@@ -465,6 +466,7 @@ export const LevelSelectModal: React.FC<LevelSelectModalProps> = React.memo(({
  * ==========================================================================*/
 interface SettingsModalProps {
   settings: GameSettings;
+  activeQuality?: ActiveQualityTier;
   characterId: CharacterId;
   onCharacterChange: (next: CharacterId) => void;
   showCustomizeControls?: boolean;
@@ -475,6 +477,7 @@ interface SettingsModalProps {
 
 export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   settings,
+  activeQuality,
   characterId,
   onCharacterChange,
   showCustomizeControls = false,
@@ -623,14 +626,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 
               <label className="flex flex-col gap-1 text-[11px] text-[#b5c8cd]">
                 <div className="flex justify-between font-mono">
-                  <span>Look Sensitivity</span>
-                  <span>{settings.mouseSensitivity.toFixed(1)}x</span>
+                  <span>Camera Rotation Sensitivity</span>
+                  <span>{settings.mouseSensitivity.toFixed(2)}x</span>
                 </div>
                 <input
                   type="range"
                   min={0.3}
-                  max={2.4}
-                  step={0.1}
+                  max={2.5}
+                  step={0.05}
                   value={settings.mouseSensitivity}
                   onChange={(e) => update('mouseSensitivity', parseFloat(e.target.value))}
                   className="horror-slider w-full"
@@ -689,36 +692,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               )}
             </div>
 
-            {/* Graphics Quality */}
+            {/* Display Quality */}
             <div className="rounded-lg bg-[#111b1f] border border-[#223136] p-2.5 flex flex-col gap-1.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] font-mono tracking-wider text-[#88a4ab] uppercase">
-                  Graphics
+                  Display Quality
                 </span>
                 <span className="text-[10px] font-mono text-[#6e8c94] truncate">
                   {settings.quality === 'auto'
-                    ? 'Adaptive FPS'
+                    ? `Auto (${(activeQuality || 'standard').toUpperCase()})`
                     : settings.quality === 'smooth'
-                      ? 'Max FPS'
+                      ? 'Lowest · Max FPS'
                       : settings.quality === 'standard'
-                        ? 'Balanced'
-                        : 'Full detail'}
+                        ? 'Balanced · Shadows & FX'
+                        : 'Highest · Full Detail'}
                 </span>
               </div>
-              <div className="grid grid-cols-4 gap-1.5">
+              <div className="grid grid-cols-4 gap-1">
                 {(
                   [
-                    { id: 'auto', label: 'Auto' },
                     { id: 'smooth', label: 'Smooth' },
-                    { id: 'standard', label: 'Std' },
+                    { id: 'standard', label: 'Standard' },
                     { id: 'ultra', label: 'Ultra' },
+                    { id: 'auto', label: 'Auto' },
                   ] as const
                 ).map((opt) => (
                   <button
                     key={opt.id}
                     type="button"
                     onClick={() => update('quality', opt.id)}
-                    className={`py-1 rounded border font-mono text-[10px] uppercase cursor-pointer transition-colors ${
+                    className={`px-1 py-1 rounded border font-mono text-[9.5px] sm:text-[10px] uppercase cursor-pointer transition-colors truncate ${
                       settings.quality === opt.id
                         ? 'bg-[#52e0b6]/20 border-[#52e0b6] text-[#8ef5d5]'
                         : 'bg-[#152024] border-[#34464c] text-[#90a8ae] hover:border-[#4b656d]'
@@ -728,6 +731,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   </button>
                 ))}
               </div>
+              <p className="text-[9.5px] font-mono text-[#6e8c94] leading-tight">
+                {((settings.quality === 'auto' ? activeQuality : settings.quality) || 'standard') === 'smooth'
+                  ? 'No shadows, simplified water & materials, lowest draw scale.'
+                  : ((settings.quality === 'auto' ? activeQuality : settings.quality) || 'standard') === 'ultra'
+                    ? 'Full shadows, high-res shaders, bump maps & 8x anisotropy.'
+                    : 'Dynamic shadows, caustics, water ripples & bump mapping.'}
+              </p>
             </div>
 
             {/* Visual Survivor Character Selector */}

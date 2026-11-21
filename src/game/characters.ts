@@ -137,6 +137,7 @@ interface CharacterVariantPool {
 }
 
 export interface CharacterSharedPool {
+  quality: ActiveQualityTier;
   textures: CharacterTextures;
   trimMats: Map<string, THREE.MeshStandardMaterial>;
   variants: Partial<Record<CharacterId, CharacterVariantPool>>;
@@ -836,6 +837,7 @@ function getCharacterPool(bundle: TextureBundle): CharacterSharedPool {
   const femaleEyeMap = createHumanEyeTexture('female', compact);
 
   pool = {
+    quality: compact ? 'smooth' : 'standard',
     textures: {
       maleSkinAlbedo: maleSkin.albedo,
       femaleSkinAlbedo: femaleSkin.albedo,
@@ -878,21 +880,69 @@ function getCharacterPool(bundle: TextureBundle): CharacterSharedPool {
   return pool;
 }
 
+function applyTierToVariantPool(
+  v: CharacterVariantPool,
+  tex: CharacterTextures,
+  tier: ActiveQualityTier
+): void {
+  const isSmooth = tier === 'smooth';
+  const envScale = isSmooth ? 0.7 : tier === 'ultra' ? 1.08 : 0.92;
+  const swapBump = (mat: THREE.MeshStandardMaterial, nextMap: THREE.Texture | null) => {
+    if (mat.bumpMap !== nextMap) {
+      mat.bumpMap = nextMap;
+      mat.needsUpdate = true;
+    }
+    mat.envMapIntensity = envScale;
+  };
+  swapBump(v.skinMat, isSmooth ? null : tex.skinBump);
+  swapBump(v.faceMat, isSmooth ? null : tex.skinBump);
+  swapBump(v.hairMat, isSmooth ? null : tex.hairBump);
+  swapBump(v.topMat, isSmooth ? null : tex.fabricBump);
+  swapBump(v.innerTopMat, isSmooth ? null : tex.fabricBump);
+  swapBump(v.pantsMat, isSmooth ? null : tex.fabricBump);
+  swapBump(v.leatherMat, isSmooth ? null : tex.fabricBump);
+  v.metalMat.envMapIntensity = envScale;
+  v.eyeMat.envMapIntensity = isSmooth ? 1.05 : tier === 'ultra' ? 1.55 : 1.35;
+}
+
 export function setCharacterQualityTier(bundle: TextureBundle, tier: ActiveQualityTier): void {
   const pool = characterPoolByBundle.get(bundle);
   if (!pool) return;
-  const isSmooth = tier === 'smooth';
-  const envScale = isSmooth ? 0.72 : tier === 'ultra' ? 1.05 : 0.92;
+  pool.quality = tier;
   for (const key of Object.keys(pool.variants) as CharacterId[]) {
     const v = pool.variants[key];
     if (!v) continue;
-    v.skinMat.envMapIntensity = envScale;
-    v.faceMat.envMapIntensity = envScale;
-    v.hairMat.envMapIntensity = envScale;
-    v.topMat.envMapIntensity = envScale;
-    v.pantsMat.envMapIntensity = envScale;
-    v.leatherMat.envMapIntensity = envScale;
-    v.metalMat.envMapIntensity = envScale;
+    applyTierToVariantPool(v, pool.textures, tier);
+  }
+}
+
+export function setCharacterTextureAnisotropy(bundle: TextureBundle, maxAniso: number): void {
+  const pool = characterPoolByBundle.get(bundle);
+  if (!pool) return;
+  const aniso = Math.max(1, Math.min(8, Math.round(maxAniso)));
+  const t = pool.textures;
+  const list = [
+    t.maleSkinAlbedo,
+    t.femaleSkinAlbedo,
+    t.skinBump,
+    t.maleFaceMap,
+    t.femaleFaceMap,
+    t.maleEyeMap,
+    t.femaleEyeMap,
+    t.maleHairMap,
+    t.femaleHairMap,
+    t.hairBump,
+    t.maleShirtMap,
+    t.femaleJacketMap,
+    t.pantsMap,
+    t.fabricBump,
+    t.leatherMap,
+  ];
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].anisotropy !== aniso) {
+      list[i].anisotropy = aniso;
+      list[i].needsUpdate = true;
+    }
   }
 }
 
@@ -1118,9 +1168,15 @@ function createClosedCollarRingGeo(
   return ensureOutwardWinding(geo);
 }
 
-function createSculptedHeadGeometry(variant: CharacterId): THREE.BufferGeometry {
+function createSculptedHeadGeometry(variant: CharacterId, compact = false): THREE.BufferGeometry {
   const isMale = variant === 'male';
-  const geo = new THREE.SphereGeometry(0.105, 48, 36, -Math.PI * 0.5, Math.PI * 2);
+  const geo = new THREE.SphereGeometry(
+    0.105,
+    compact ? 24 : 32,
+    compact ? 18 : 24,
+    -Math.PI * 0.5,
+    Math.PI * 2
+  );
   const pos = geo.attributes.position;
 
   for (let i = 0; i < pos.count; i++) {
@@ -1302,22 +1358,22 @@ function createSculptedLipsGeometry(variant: CharacterId): {
   return { upper, lower };
 }
 
-function createSculptedEarGeometry(side: -1 | 1): THREE.BufferGeometry {
+function createSculptedEarGeometry(side: -1 | 1, compact = false): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   // Outer helix C-rim
-  const helix = new THREE.TorusGeometry(0.0155, 0.0048, 8, 16, Math.PI * 1.42);
+  const helix = new THREE.TorusGeometry(0.0155, 0.0048, compact ? 5 : 6, compact ? 10 : 12, Math.PI * 1.42);
   helix.rotateZ(-Math.PI * 0.24);
   helix.scale(0.85, 1.18, 0.75);
   parts.push(helix);
 
   // Inner backing bowl so ear is solid from back/front/side
-  const concha = new THREE.SphereGeometry(0.014, 12, 10);
+  const concha = new THREE.SphereGeometry(0.014, compact ? 8 : 10, compact ? 6 : 8);
   concha.scale(0.68, 1.05, 0.36);
   concha.translate(-0.0015, -0.001, -0.002);
   parts.push(concha);
 
   // Earlobe
-  const lobe = new THREE.SphereGeometry(0.0072, 10, 8);
+  const lobe = new THREE.SphereGeometry(0.0072, compact ? 6 : 8, compact ? 5 : 6);
   lobe.scale(0.75, 1.1, 0.72);
   lobe.translate(-0.001, -0.0155, 0.0015);
   parts.push(lobe);
@@ -1334,8 +1390,14 @@ function createSculptedEarGeometry(side: -1 | 1): THREE.BufferGeometry {
  * Eyeball sphere with planar front-hemisphere UV mapping on the iris/pupil face (+Z)
  * so human iris, limbal ring, radial collagen fibers, and pupil are circular with zero distortion.
  */
-function createPlanarUvEyeballGeometry(radius = 0.0128): THREE.BufferGeometry {
-  const geo = new THREE.SphereGeometry(radius, 22, 16, -Math.PI * 0.5, Math.PI * 2);
+function createPlanarUvEyeballGeometry(radius = 0.0128, compact = false): THREE.BufferGeometry {
+  const geo = new THREE.SphereGeometry(
+    radius,
+    compact ? 12 : 16,
+    compact ? 8 : 12,
+    -Math.PI * 0.5,
+    Math.PI * 2
+  );
   const pos = geo.attributes.position;
   const uv = geo.attributes.uv;
   for (let i = 0; i < pos.count; i++) {
@@ -1421,10 +1483,18 @@ function createSculptedBrowGeometry(variant: CharacterId, side: -1 | 1): THREE.B
  * Builds anatomically true left (side = -1) or right (side = 1) sculpted 5-finger human hand.
  * Never relies on negative scale, ensuring positive determinant & outward normals on both hands.
  */
-function createSculptedHandGeometry(variant: CharacterId, side: -1 | 1): THREE.BufferGeometry {
+function createSculptedHandGeometry(
+  variant: CharacterId,
+  side: -1 | 1,
+  compact = false
+): THREE.BufferGeometry {
   const s = variant === 'male' ? 1.0 : 0.91;
   const parts: THREE.BufferGeometry[] = [];
   const inward = -side; // Palm faces inward toward body (-side * X)
+  const capSegs = 2;
+  const radSegs = compact ? 5 : 6;
+  const kSegsW = compact ? 5 : 6;
+  const kSegsH = compact ? 4 : 5;
 
   // Sculpted palm: thin in X, broad front-to-back in Z so 4 fingers line up naturally along Z
   const palm = createLoftedBodyGeo(
@@ -1433,12 +1503,12 @@ function createSculptedHandGeometry(variant: CharacterId, side: -1 | 1): THREE.B
       { y: -0.038 * s, rx: 0.0155 * s, rz: 0.037 * s }, // mid palm
       { y: 0.008 * s, rx: 0.015 * s, rz: 0.029 * s }, // wrist base overlaps forearm cleanly
     ],
-    14
+    compact ? 10 : 12
   );
   parts.push(palm);
 
   // Thenar thumb muscle pad on inner-front palm
-  const thenar = new THREE.SphereGeometry(0.014 * s, 10, 8);
+  const thenar = new THREE.SphereGeometry(0.014 * s, compact ? 7 : 8, compact ? 5 : 6);
   thenar.scale(0.85, 1.45, 0.95);
   thenar.translate(inward * 0.007 * s, -0.028 * s, 0.022 * s);
   parts.push(thenar);
@@ -1456,7 +1526,7 @@ function createSculptedHandGeometry(variant: CharacterId, side: -1 | 1): THREE.B
     const baseY = -0.072 * s;
 
     // Knuckle joint
-    const knuckle = new THREE.SphereGeometry(f.rad * 1.06 * s, 8, 6);
+    const knuckle = new THREE.SphereGeometry(f.rad * 1.06 * s, kSegsW, kSegsH);
     knuckle.translate(knuckleX, baseY, f.z * s);
     parts.push(knuckle);
 
@@ -1464,7 +1534,7 @@ function createSculptedHandGeometry(variant: CharacterId, side: -1 | 1): THREE.B
     const l1 = f.len1 * s;
     const dx1 = inward * Math.sin(f.curl1) * l1;
     const dy1 = -Math.cos(f.curl1) * l1;
-    const seg1 = new THREE.CapsuleGeometry(f.rad * s, l1 * 0.72, 4, 8);
+    const seg1 = new THREE.CapsuleGeometry(f.rad * s, l1 * 0.72, capSegs, radSegs);
     seg1.rotateZ(inward * f.curl1);
     seg1.translate(knuckleX + dx1 * 0.5, baseY + dy1 * 0.5, f.z * s);
     parts.push(seg1);
@@ -1473,20 +1543,20 @@ function createSculptedHandGeometry(variant: CharacterId, side: -1 | 1): THREE.B
     const l2 = f.len2 * s;
     const dx2 = inward * Math.sin(f.curl2) * l2;
     const dy2 = -Math.cos(f.curl2) * l2;
-    const seg2 = new THREE.CapsuleGeometry(f.rad * 0.84 * s, l2 * 0.72, 4, 8);
+    const seg2 = new THREE.CapsuleGeometry(f.rad * 0.84 * s, l2 * 0.72, capSegs, radSegs);
     seg2.rotateZ(inward * f.curl2);
     seg2.translate(knuckleX + dx1 + dx2 * 0.5, baseY + dy1 + dy2 * 0.5, f.z * s);
     parts.push(seg2);
   }
 
   // Articulated thumb extending forward (+Z) and curving inward (-side * X)
-  const tBase = new THREE.CapsuleGeometry(0.008 * s, 0.025 * s, 4, 8);
+  const tBase = new THREE.CapsuleGeometry(0.008 * s, 0.025 * s, capSegs, radSegs);
   tBase.rotateX(0.62);
   tBase.rotateZ(inward * 0.28);
   tBase.translate(inward * 0.011 * s, -0.038 * s, 0.036 * s);
   parts.push(tBase);
 
-  const tTip = new THREE.CapsuleGeometry(0.0068 * s, 0.021 * s, 4, 8);
+  const tTip = new THREE.CapsuleGeometry(0.0068 * s, 0.021 * s, capSegs, radSegs);
   tTip.rotateX(0.32);
   tTip.rotateZ(inward * 0.45);
   tTip.translate(inward * 0.018 * s, -0.058 * s, 0.048 * s);
@@ -1498,12 +1568,16 @@ function createSculptedHandGeometry(variant: CharacterId, side: -1 | 1): THREE.B
   return merged;
 }
 
-function createSculptedBootGeometries(variant: CharacterId): {
+function createSculptedBootGeometries(
+  variant: CharacterId,
+  compact = false
+): {
   upper: THREE.BufferGeometry;
   sole: THREE.BufferGeometry;
 } {
   const s = variant === 'male' ? 1.0 : 0.94;
   const upperParts: THREE.BufferGeometry[] = [];
+  const bootSegs = compact ? 12 : 14;
 
   // Ankle shaft rises slightly higher (y=0.165) for generous overlap inside trouser hem
   const shaft = createLoftedBodyGeo(
@@ -1512,7 +1586,7 @@ function createSculptedBootGeometries(variant: CharacterId): {
       { y: 0.095, rx: 0.05 * s, rz: 0.056 * s },
       { y: 0.165, rx: 0.052 * s, rz: 0.056 * s },
     ],
-    16
+    bootSegs
   );
   upperParts.push(shaft);
 
@@ -1523,7 +1597,7 @@ function createSculptedBootGeometries(variant: CharacterId): {
       { y: 0.052, rx: 0.047 * s, rz: 0.105 * s, cz: 0.045 * s },
       { y: 0.08, rx: 0.038 * s, rz: 0.07 * s, cz: 0.02 * s },
     ],
-    16
+    bootSegs
   );
   upperParts.push(vamp);
 
@@ -1545,7 +1619,7 @@ function createSculptedBootGeometries(variant: CharacterId): {
       { y: 0.0, rx: 0.058 * s, rz: 0.135 * s, cz: 0.052 * s },
       { y: 0.024, rx: 0.056 * s, rz: 0.132 * s, cz: 0.051 * s },
     ],
-    16
+    bootSegs
   );
 
   return { upper, sole };
@@ -1635,9 +1709,15 @@ function createHairStrandGeo(
  * Builds closed volumetric hair cap sphere (never open hem shell) where lower front face
  * region tucks inside skull safely while crown/temples/nape sweep smoothly around head.
  */
-function createClosedHairVolumeCap(variant: CharacterId): THREE.BufferGeometry {
+function createClosedHairVolumeCap(variant: CharacterId, compact = false): THREE.BufferGeometry {
   const isMale = variant === 'male';
-  const geo = new THREE.SphereGeometry(0.108, 32, 24, -Math.PI * 0.5, Math.PI * 2);
+  const geo = new THREE.SphereGeometry(
+    0.108,
+    compact ? 20 : 24,
+    compact ? 14 : 18,
+    -Math.PI * 0.5,
+    Math.PI * 2
+  );
   const pos = geo.attributes.position;
 
   for (let i = 0; i < pos.count; i++) {
@@ -1679,17 +1759,25 @@ function createClosedHairVolumeCap(variant: CharacterId): THREE.BufferGeometry {
   return ensureOutwardWinding(geo);
 }
 
-function buildHairGeometries(variant: CharacterId): {
+function buildHairGeometries(
+  variant: CharacterId,
+  compact = false
+): {
   capGeo: THREE.BufferGeometry;
   tieGeo: THREE.BufferGeometry | null;
   lockGroups: CharacterVariantPool['hairLockGroups'];
 } {
+  const sRad = compact ? 4 : 5;
+  const sTub = compact ? 6 : 7;
+  const sTubLong = compact ? 7 : 8;
+
   if (variant === 'male') {
-    const capParts: THREE.BufferGeometry[] = [createClosedHairVolumeCap('male')];
+    const capParts: THREE.BufferGeometry[] = [createClosedHairVolumeCap('male', compact)];
 
     // Sculpted layered crown-to-nape strands
-    for (let i = 0; i < 20; i++) {
-      const side = (i - 9.5) / 9.5;
+    const mCrownCount = compact ? 16 : 20;
+    for (let i = 0; i < mCrownCount; i++) {
+      const side = (i - (mCrownCount - 1) * 0.5) / ((mCrownCount - 1) * 0.5);
       const xStart = side * 0.074;
       const topY = 0.12 - Math.abs(side) * 0.026;
       const strand = createHairStrandGeo(
@@ -1701,8 +1789,8 @@ function buildHairGeometries(variant: CharacterId): {
         ],
         0.016,
         0.007,
-        6,
-        8
+        sRad,
+        sTub
       );
       capParts.push(strand);
     }
@@ -1717,8 +1805,8 @@ function buildHairGeometries(variant: CharacterId): {
           ],
           0.012,
           0.005,
-          6,
-          6
+          sRad,
+          compact ? 4 : 5
         );
         capParts.push(strand);
       }
@@ -1742,8 +1830,8 @@ function buildHairGeometries(variant: CharacterId): {
         ],
         0.0145,
         0.005,
-        6,
-        8
+        sRad,
+        sTub
       );
       frontStrands.push(lock);
     }
@@ -1772,11 +1860,12 @@ function buildHairGeometries(variant: CharacterId): {
   }
 
   // Female hairstyle: long, lush layered 3D wavy hair parted at crown and flowing down her back to waist level
-  const capParts: THREE.BufferGeometry[] = [createClosedHairVolumeCap('female')];
+  const capParts: THREE.BufferGeometry[] = [createClosedHairVolumeCap('female', compact)];
 
   // Layered crown & parted skull strands sweeping down into the long back cascade
-  for (let i = 0; i < 26; i++) {
-    const f = (i - 12.5) / 12.5;
+  const fCrownCount = compact ? 18 : 24;
+  for (let i = 0; i < fCrownCount; i++) {
+    const f = (i - (fCrownCount - 1) * 0.5) / ((fCrownCount - 1) * 0.5);
     const partShift = 0.012; // subtle natural off-center crown part
     const xStart = f * 0.072 + partShift * (1 - Math.abs(f));
     const crownY = 0.122 - Math.abs(f) * 0.028;
@@ -1787,10 +1876,10 @@ function buildHairGeometries(variant: CharacterId): {
         [xStart * 1.04, 0.015 - Math.abs(f) * 0.016, -0.094 + Math.abs(f) * 0.024],
         [xStart * 0.96, -0.048 - Math.abs(f) * 0.012, -0.106 + Math.abs(f) * 0.032],
       ],
-      0.0155,
+      compact ? 0.017 : 0.0155,
       0.0085,
-      6,
-      9
+      sRad,
+      sTub
     );
     capParts.push(strand);
   }
@@ -1806,8 +1895,8 @@ function buildHairGeometries(variant: CharacterId): {
         ],
         0.013,
         0.0065,
-        6,
-        7
+        sRad,
+        compact ? 5 : 6
       );
       capParts.push(temple);
     }
@@ -1834,8 +1923,8 @@ function buildHairGeometries(variant: CharacterId): {
         ],
         0.0125,
         0.004,
-        6,
-        10
+        sRad,
+        sTubLong
       );
       frontWaves.push(sGeo);
     }
@@ -1871,8 +1960,8 @@ function buildHairGeometries(variant: CharacterId): {
         ],
         0.014,
         0.0045,
-        6,
-        10
+        sRad,
+        sTubLong
       );
       sideCurtains.push(cGeo);
     }
@@ -1895,8 +1984,9 @@ function buildHairGeometries(variant: CharacterId): {
 
   // Index 4: Upper Back Flowing Hair Mantle (root tier cascading behind shoulder blades)
   const upperBackStrands: THREE.BufferGeometry[] = [];
-  for (let i = 0; i < 18; i++) {
-    const f = (i - 8.5) / 8.5; // -1 .. +1
+  const backCount = compact ? 14 : 18;
+  for (let i = 0; i < backCount; i++) {
+    const f = (i - (backCount - 1) * 0.5) / ((backCount - 1) * 0.5); // -1 .. +1
     const waveX = Math.sin(i * 1.35) * 0.006;
     const waveZ = Math.cos(i * 1.1) * 0.005;
     const outerLift = Math.abs(f) * 0.012;
@@ -1907,10 +1997,10 @@ function buildHairGeometries(variant: CharacterId): {
         [f * 0.114 - waveX, -0.165, -0.052 + waveZ * 0.8 + outerLift],
         [f * 0.118 + waveX * 0.7, -0.258 + Math.abs(f) * 0.014, -0.048 + outerLift],
       ],
-      0.017,
+      compact ? 0.019 : 0.017,
       0.011,
-      6,
-      10
+      sRad,
+      sTub
     );
     upperBackStrands.push(lock);
   }
@@ -1934,8 +2024,8 @@ function buildHairGeometries(variant: CharacterId): {
 
   // Index 5: Mid-Back Layered Wave Cascade (chained to upperBack)
   const midBackStrands: THREE.BufferGeometry[] = [];
-  for (let i = 0; i < 18; i++) {
-    const f = (i - 8.5) / 8.5;
+  for (let i = 0; i < backCount; i++) {
+    const f = (i - (backCount - 1) * 0.5) / ((backCount - 1) * 0.5);
     const waveX = Math.cos(i * 1.5) * 0.009;
     const waveZ = Math.sin(i * 1.25) * 0.007;
     const outerTaper = Math.abs(f) * 0.015;
@@ -1946,10 +2036,10 @@ function buildHairGeometries(variant: CharacterId): {
         [f * 0.130 - waveX, -0.162, -0.008 - waveZ + outerTaper],
         [f * 0.122 + waveX * 0.6, -0.238 + Math.abs(f) * 0.02, -0.010 + outerTaper * 0.8],
       ],
-      0.0145,
+      compact ? 0.016 : 0.0145,
       0.0085,
-      6,
-      10
+      sRad,
+      sTub
     );
     midBackStrands.push(lock);
   }
@@ -1974,8 +2064,9 @@ function buildHairGeometries(variant: CharacterId): {
 
   // Index 6: Lower Waist-Length Tapered Flowing Tips (chained to midBack)
   const lowerTipsStrands: THREE.BufferGeometry[] = [];
-  for (let i = 0; i < 16; i++) {
-    const f = (i - 7.5) / 7.5;
+  const lowerCount = compact ? 12 : 16;
+  for (let i = 0; i < lowerCount; i++) {
+    const f = (i - (lowerCount - 1) * 0.5) / ((lowerCount - 1) * 0.5);
     const len = 0.235 - Math.abs(f) * 0.055 + Math.sin(i * 1.7) * 0.016; // soft layered V-cut
     const curlX = Math.sin(i * 1.4) * 0.011;
     const curlZ = Math.cos(i * 1.3) * 0.009;
@@ -1986,10 +2077,10 @@ function buildHairGeometries(variant: CharacterId): {
         [f * 0.112 - curlX, -len * 0.70, -0.004 - curlZ],
         [f * 0.095 + curlX * 0.5, -len, 0.008 + curlZ * 0.4],
       ],
-      0.012,
+      compact ? 0.0135 : 0.012,
       0.0032,
-      6,
-      10
+      sRad,
+      sTub
     );
     lowerTipsStrands.push(lock);
   }
@@ -2020,7 +2111,13 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
   if (existing) return existing;
 
   const tex = rootPool.textures;
+  const compact = Boolean((bundle as { compact?: boolean }).compact);
   const isMale = variant === 'male';
+  const bodySegs = compact ? 16 : 20;
+  const torsoSegs = compact ? 18 : 22;
+  const limbSegs = compact ? 14 : 16;
+  const jointSegsW = compact ? 10 : 12;
+  const jointSegsH = compact ? 8 : 10;
   const geometries: THREE.BufferGeometry[] = [];
   const reg = <T extends THREE.BufferGeometry>(g: T): T => {
     tagShared(g);
@@ -2164,7 +2261,7 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: -0.015, rx: 0.182, rz: 0.132, backBoost: 0.022 },
             { y: 0.095, rx: 0.15, rz: 0.112 },
           ],
-      24
+      bodySegs
     )
   );
 
@@ -2190,25 +2287,25 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: 0.45, rx: 0.166, rz: 0.106 },
             { y: 0.505, rx: 0.094, rz: 0.086 },
           ],
-      28
+      torsoSegs
     )
   );
 
   // Solid closed watertight collar + placket/lapels
   const collarParts: THREE.BufferGeometry[] = [];
   if (isMale) {
-    collarParts.push(createClosedCollarRingGeo(0.465, 0.518, 0.074, 0.07, 0.098, 0.092, 0.004, 24));
+    collarParts.push(createClosedCollarRingGeo(0.465, 0.518, 0.074, 0.07, 0.098, 0.092, 0.004, bodySegs));
     const placket = new THREE.BoxGeometry(0.036, 0.14, 0.02);
     placket.translate(0, 0.395, 0.146);
     collarParts.push(placket);
     for (let b = 0; b < 3; b++) {
-      const btn = new THREE.CylinderGeometry(0.006, 0.006, 0.009, 10);
+      const btn = new THREE.CylinderGeometry(0.006, 0.006, 0.009, 8);
       btn.rotateX(Math.PI / 2);
       btn.translate(0, 0.435 - b * 0.038, 0.156);
       collarParts.push(btn);
     }
   } else {
-    collarParts.push(createClosedCollarRingGeo(0.465, 0.525, 0.068, 0.066, 0.095, 0.09, -0.002, 24));
+    collarParts.push(createClosedCollarRingGeo(0.465, 0.525, 0.068, 0.066, 0.095, 0.09, -0.002, bodySegs));
     for (const s of [-1, 1]) {
       const lapel = new THREE.BoxGeometry(0.038, 0.125, 0.022);
       lapel.rotateZ(s * 0.22);
@@ -2227,7 +2324,7 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
   // Tactical cross-chest harness / waist pockets
   const harnessParts: THREE.BufferGeometry[] = [];
   if (isMale) {
-    const strap = new THREE.TorusGeometry(0.18, 0.015, 10, 28);
+    const strap = new THREE.TorusGeometry(0.18, 0.015, 7, bodySegs);
     strap.scale(1.06, 1.32, 0.8);
     strap.rotateZ(0.45);
     strap.translate(0, 0.28, 0.006);
@@ -2258,7 +2355,7 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: -0.024, rx: 0.156, rz: 0.118 },
             { y: 0.024, rx: 0.152, rz: 0.114 },
           ],
-      24
+      bodySegs
     )
   );
 
@@ -2280,11 +2377,11 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: 0.045, rx: 0.049, rz: 0.049 },
             { y: 0.11, rx: 0.048, rz: 0.05 },
           ],
-      18
+      limbSegs
     )
   );
 
-  const headGeo = reg(createSculptedHeadGeometry(variant));
+  const headGeo = reg(createSculptedHeadGeometry(variant, compact));
   const noseBuilt = createHumanNoseGeometry(variant);
   const noseGeo = reg(noseBuilt.nose);
   const nostrilGeo = reg(noseBuilt.nostrils);
@@ -2293,10 +2390,10 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
   const upperLipGeo = reg(lipsBuilt.upper);
   const lowerLipGeo = reg(lipsBuilt.lower);
 
-  const leftEarGeo = reg(createSculptedEarGeometry(-1));
-  const rightEarGeo = reg(createSculptedEarGeometry(1));
+  const leftEarGeo = reg(createSculptedEarGeometry(-1, compact));
+  const rightEarGeo = reg(createSculptedEarGeometry(1, compact));
 
-  const eyeballGeo = reg(createPlanarUvEyeballGeometry(0.0128));
+  const eyeballGeo = reg(createPlanarUvEyeballGeometry(0.0128, compact));
   const lidsBuilt = createSolidEyelidGeometries();
   const upperEyelidGeo = reg(lidsBuilt.upper);
   const lowerEyelidGeo = reg(lidsBuilt.lower);
@@ -2304,7 +2401,7 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
   const leftBrowGeo = reg(createSculptedBrowGeometry(variant, -1));
   const rightBrowGeo = reg(createSculptedBrowGeometry(variant, 1));
 
-  const hairBuilt = buildHairGeometries(variant);
+  const hairBuilt = buildHairGeometries(variant, compact);
   const hairCapGeo = reg(hairBuilt.capGeo);
   const hairTieGeo = hairBuilt.tieGeo ? reg(hairBuilt.tieGeo) : null;
   for (const lg of hairBuilt.lockGroups) {
@@ -2313,7 +2410,7 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
 
   // Deltoid shoulder joint cap + upper arm + sleeve + elbow joint + forearm + cuff + L/R hands
   const shoulderCapGeo = reg(
-    new THREE.SphereGeometry(isMale ? 0.058 : 0.05, 14, 12)
+    new THREE.SphereGeometry(isMale ? 0.058 : 0.05, jointSegsW, jointSegsH)
   );
 
   const upperArmGeo = reg(
@@ -2331,7 +2428,7 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: -0.025, rx: 0.051, rz: 0.049 },
             { y: 0.042, rx: 0.046, rz: 0.044 },
           ],
-      18
+      limbSegs
     )
   );
 
@@ -2350,11 +2447,13 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: -0.02, rx: 0.057, rz: 0.055 },
             { y: 0.04, rx: 0.049, rz: 0.047 },
           ],
-      18
+      limbSegs
     )
   );
 
-  const elbowGeo = reg(new THREE.SphereGeometry(isMale ? 0.045 : 0.04, 12, 10));
+  const elbowGeo = reg(
+    new THREE.SphereGeometry(isMale ? 0.045 : 0.04, compact ? 8 : 10, compact ? 7 : 8)
+  );
 
   const forearmGeo = reg(
     createLoftedBodyGeo(
@@ -2369,7 +2468,7 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: -0.11, rx: 0.039, rz: 0.038 },
             { y: 0.018, rx: 0.04, rz: 0.039 },
           ],
-      18
+      limbSegs
     )
   );
 
@@ -2386,12 +2485,12 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: -0.1, rx: 0.045, rz: 0.044 },
             { y: 0.02, rx: 0.046, rz: 0.045 },
           ],
-      18
+      limbSegs
     )
   );
 
-  const leftHandGeo = reg(createSculptedHandGeometry(variant, -1));
-  const rightHandGeo = reg(createSculptedHandGeometry(variant, 1));
+  const leftHandGeo = reg(createSculptedHandGeometry(variant, -1, compact));
+  const rightHandGeo = reg(createSculptedHandGeometry(variant, 1, compact));
 
   // Sculpted thigh & knee & calf/shin & boots
   const thighGeo = reg(
@@ -2409,11 +2508,11 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: -0.12, rx: 0.088, rz: 0.09, frontBoost: 0.008 },
             { y: 0.055, rx: 0.092, rz: 0.094 },
           ],
-      20
+      limbSegs
     )
   );
 
-  const kneeGeo = reg(new THREE.SphereGeometry(isMale ? 0.064 : 0.058, 14, 12));
+  const kneeGeo = reg(new THREE.SphereGeometry(isMale ? 0.064 : 0.058, jointSegsW, jointSegsH));
 
   const shinGeo = reg(
     createLoftedBodyGeo(
@@ -2430,19 +2529,19 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
             { y: -0.11, rx: 0.062, rz: 0.066, backBoost: 0.009 },
             { y: 0.02, rx: 0.056, rz: 0.056 },
           ],
-      20
+      limbSegs
     )
   );
 
-  const boot = createSculptedBootGeometries(variant);
+  const boot = createSculptedBootGeometries(variant, compact);
   const bootUpperGeo = reg(boot.upper);
   const bootSoleGeo = reg(boot.sole);
 
   const trimBandGeo = reg(
-    new THREE.CylinderGeometry(isMale ? 0.047 : 0.042, isMale ? 0.047 : 0.042, 0.032, 16)
+    new THREE.CylinderGeometry(isMale ? 0.047 : 0.042, isMale ? 0.047 : 0.042, 0.032, compact ? 12 : 14)
   );
   const lampBodyGeo = reg(new THREE.BoxGeometry(0.026, 0.038, 0.022));
-  const lampLensGeo = reg(new THREE.CircleGeometry(0.009, 12));
+  const lampLensGeo = reg(new THREE.CircleGeometry(0.009, 10));
 
   // Pre-merge static same-bone same-material sub-meshes once per variant to cut draw calls ~45% with identical geometry
   const headSkinMergedGeo = reg(
@@ -2534,6 +2633,7 @@ function getCharacterVariantPool(bundle: TextureBundle, variant: CharacterId): C
     lampLensGeo,
   };
 
+  applyTierToVariantPool(vp, tex, rootPool.quality);
   rootPool.variants[variant] = vp;
   return vp;
 }

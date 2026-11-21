@@ -32,7 +32,7 @@ import {
   GameSettings,
   HudSnapshot,
   normalizeCharacterId,
-  normalizeQualityPreset,
+  sanitizeGameSettings,
   SaveData,
   TouchControlPlacement,
   TouchLayoutConfig,
@@ -66,15 +66,10 @@ function loadSaveData(): SaveData {
 function loadSettings(): GameSettings {
   try {
     const raw = localStorage.getItem(STORAGE_SETTINGS_KEY);
-    if (!raw) return DEFAULT_SETTINGS;
-    const parsed = JSON.parse(raw) as Partial<GameSettings>;
-    return {
-      ...DEFAULT_SETTINGS,
-      ...parsed,
-      quality: normalizeQualityPreset(parsed.quality),
-    };
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    return sanitizeGameSettings(JSON.parse(raw));
   } catch {
-    return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS };
   }
 }
 
@@ -541,12 +536,13 @@ export default function App() {
 
   const handleSettingsChange = useCallback(
     (next: GameSettings) => {
-      setSettings(next);
-      engineRef.current?.updateSettings(next);
-      voiceMgr.setVoiceActive(next.voiceEnabled);
-      voiceMgr.setVoiceVolume(next.voiceVolume);
+      const sanitized = sanitizeGameSettings(next);
+      setSettings(sanitized);
+      engineRef.current?.updateSettings(sanitized);
+      voiceMgr.setVoiceActive(sanitized.voiceEnabled);
+      voiceMgr.setVoiceVolume(sanitized.voiceVolume);
       try {
-        localStorage.setItem(STORAGE_SETTINGS_KEY, JSON.stringify(next));
+        localStorage.setItem(STORAGE_SETTINGS_KEY, JSON.stringify(sanitized));
       } catch {
         // ignore
       }
@@ -982,6 +978,7 @@ export default function App() {
       {showSettings && (
         <SettingsModal
           settings={settings}
+          activeQuality={hud.activeQuality}
           characterId={characterId}
           onCharacterChange={handleCharacterChange}
           showCustomizeControls={isTouchDevice || settings.touchControls !== 'off'}

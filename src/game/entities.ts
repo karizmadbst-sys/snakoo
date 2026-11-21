@@ -136,19 +136,27 @@ export function setEntityQualityTier(textures: TextureBundle, tier: ActiveQualit
     const m = pool.monster;
     const isSmooth = tier === 'smooth';
     const isUltra = tier === 'ultra';
+    const nextNormal = isSmooth ? null : textures.monsterNormal;
+    const nextRough = isSmooth ? null : textures.monsterRoughness;
+    if (m.skinMat.normalMap !== nextNormal || m.skinMat.roughnessMap !== nextRough) {
+      m.skinMat.normalMap = nextNormal;
+      m.skinMat.roughnessMap = nextRough;
+      m.skinMat.needsUpdate = true;
+    }
     m.skinMat.roughness = textures.compact ? 0.22 : 0.28;
-    m.skinMat.envMapIntensity = isSmooth ? 0.85 : isUltra ? 1.52 : 1.32;
+    m.skinMat.envMapIntensity = isSmooth ? 0.8 : isUltra ? 1.52 : 1.28;
+    const nextClearcoat = isSmooth ? 0.22 : isUltra ? 1.0 : 0.78;
     if ('clearcoat' in m.skinMat) {
-      (m.skinMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.35 : 0.94;
+      (m.skinMat as THREE.MeshPhysicalMaterial).clearcoat = nextClearcoat;
     }
     if ('clearcoat' in m.finMat) {
-      (m.finMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.3 : 0.88;
+      (m.finMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.2 : isUltra ? 0.92 : 0.74;
     }
     if ('clearcoat' in m.mouthMat) {
-      (m.mouthMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.35 : 0.96;
+      (m.mouthMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.25 : isUltra ? 1.0 : 0.82;
     }
     if ('clearcoat' in m.toothMat) {
-      (m.toothMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.3 : 0.85;
+      (m.toothMat as THREE.MeshPhysicalMaterial).clearcoat = isSmooth ? 0.2 : isUltra ? 0.9 : 0.7;
     }
   }
 }
@@ -494,7 +502,7 @@ function buildContinuousSerpentBodyGeometry(scale: number, compact = false): THR
   return geo;
 }
 
-function buildContinuousDorsalFinGeometry(scale: number): THREE.BufferGeometry {
+function buildContinuousDorsalFinGeometry(scale: number, compact = false): THREE.BufferGeometry {
   // Exact SERPENTIS icon dorsal blade silhouette:
   // 1) 46 tall concave-curved swept 3D obsidian-crimson dorsal blade spikes arching along neck & back
   // 2) Serrated caudal tail crest for predatory aquatic propulsion
@@ -625,7 +633,7 @@ function buildContinuousDorsalFinGeometry(scale: number): THREE.BufferGeometry {
 
   // 2) Serrated Caudal Tail Fin Blade (t > 0.66)
   {
-    const rings = 42;
+    const rings = compact ? 26 : 34;
     const t0 = 0.66;
     const t1 = 1.0;
     const vertCount = (rings + 1) * 2;
@@ -673,10 +681,10 @@ function buildContinuousDorsalFinGeometry(scale: number): THREE.BufferGeometry {
   return merged ?? new THREE.BufferGeometry();
 }
 
-function sculptUpperSkullGeometry(): THREE.BufferGeometry {
+function sculptUpperSkullGeometry(compact = false): THREE.BufferGeometry {
   // Exact SERPENTIS icon armored predator cranium (z: -0.84 neck blend -> +1.58 hooked snout tip)
-  const slices = 46;
-  const radials = 36;
+  const slices = compact ? 24 : 32;
+  const radials = compact ? 18 : 24;
   const vertCount = (slices + 1) * (radials + 1);
   const positions = new Float32Array(vertCount * 3);
   const uvs = new Float32Array(vertCount * 2);
@@ -799,10 +807,10 @@ function sculptUpperSkullGeometry(): THREE.BufferGeometry {
   return geo;
 }
 
-function sculptLowerJawGeometry(): THREE.BufferGeometry {
+function sculptLowerJawGeometry(compact = false): THREE.BufferGeometry {
   // Narrow V-tapered rugged armored mandible matching SERPENTIS icon jaw silhouette
-  const slices = 34;
-  const radials = 28;
+  const slices = compact ? 20 : 26;
+  const radials = compact ? 16 : 20;
   const vertCount = (slices + 1) * (radials + 1);
   const positions = new Float32Array(vertCount * 3);
   const uvs = new Float32Array(vertCount * 2);
@@ -942,10 +950,15 @@ function createSweptHornOrCrestGeometry(
   return geo;
 }
 
-function createRecurvedToothGeometry(length: number, baseRadius: number, curveBack: number): THREE.BufferGeometry {
-  // Razor-thin needle predator fang (exact 10x10 = 121 verts/tooth) catching inner red maw glow at root
-  const rings = 10;
-  const radials = 10;
+function createRecurvedToothGeometry(
+  length: number,
+  baseRadius: number,
+  curveBack: number,
+  compact = false
+): THREE.BufferGeometry {
+  // Razor-thin needle predator fang catching inner red maw glow at root (10x10 desktop, 5x5 mobile)
+  const rings = compact ? 5 : 10;
+  const radials = compact ? 5 : 10;
   const vertCount = (rings + 1) * (radials + 1);
   const positions = new Float32Array(vertCount * 3);
   const colors = new Float32Array(vertCount * 3);
@@ -1006,30 +1019,30 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
     useLightMats
       ? new THREE.MeshStandardMaterial({
           map: textures.monsterSkin,
-          normalMap: textures.monsterNormal,
+          normalMap: isSmooth ? null : textures.monsterNormal,
           normalScale: new THREE.Vector2(1.75, 1.75),
-          roughnessMap: textures.monsterRoughness,
+          roughnessMap: isSmooth ? null : textures.monsterRoughness,
           roughness: 0.22,
           metalness: 0.18,
           emissive: new THREE.Color(0xffffff),
           emissiveMap: textures.monsterEmissive,
           emissiveIntensity: 1.05,
-          envMapIntensity: isSmooth ? 0.95 : 1.35,
+          envMapIntensity: isSmooth ? 0.8 : 1.35,
         })
       : new THREE.MeshPhysicalMaterial({
           map: textures.monsterSkin,
-          normalMap: textures.monsterNormal,
+          normalMap: isSmooth ? null : textures.monsterNormal,
           normalScale: new THREE.Vector2(1.9, 1.9),
-          roughnessMap: textures.monsterRoughness,
+          roughnessMap: isSmooth ? null : textures.monsterRoughness,
           roughness: 0.28,
           metalness: 0.14,
           emissive: new THREE.Color(0xffffff),
           emissiveMap: textures.monsterEmissive,
           emissiveIntensity: 1.05,
-          clearcoat: isSmooth ? 0.35 : 0.94,
+          clearcoat: isSmooth ? 0.22 : isUltra ? 1.0 : 0.78,
           clearcoatRoughness: 0.06,
           ior: 1.46,
-          envMapIntensity: isSmooth ? 0.85 : isUltra ? 1.52 : 1.32,
+          envMapIntensity: isSmooth ? 0.8 : isUltra ? 1.52 : 1.28,
         })
   );
 
@@ -1145,7 +1158,14 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         })
   );
 
-  const upperSkullGeo = tagShared(sculptUpperSkullGeometry());
+  const compact = Boolean(textures.compact);
+  const hRingsL = compact ? 10 : 12;
+  const hRingsM = compact ? 8 : 10;
+  const hRingsS = compact ? 7 : 8;
+  const hRadL = compact ? 5 : 6;
+  const hRadS = compact ? 4 : 5;
+
+  const upperSkullGeo = tagShared(sculptUpperSkullGeometry(compact));
   const palateGeo = tagShared(
     createSweptHornOrCrestGeometry(
       [
@@ -1155,8 +1175,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.34,
       0.085,
-      10,
-      10
+      hRingsS,
+      compact ? 6 : 8
     )
   );
 
@@ -1174,8 +1194,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.072,
         0.08,
-        16,
-        8
+        hRingsL,
+        hRadL
       ),
       // 2) Secondary tall temporal crown horn arching upward & back above temple
       createSweptHornOrCrestGeometry(
@@ -1187,8 +1207,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.082,
         0.092,
-        14,
-        8
+        compact ? 9 : 11,
+        hRadL
       ),
       // 3) Inner parietal swept crown blade flanking center crest
       createSweptHornOrCrestGeometry(
@@ -1199,8 +1219,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.064,
         0.084,
-        12,
-        8
+        hRingsM,
+        hRadL
       ),
       // 4) Furious swept supraorbital brow spike above glowing red eye
       createSweptHornOrCrestGeometry(
@@ -1211,8 +1231,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.07,
         0.078,
-        12,
-        8
+        hRingsM,
+        hRadL
       ),
       // 5) Anterior brow-bridge bristle spike
       createSweptHornOrCrestGeometry(
@@ -1223,8 +1243,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.05,
         0.058,
-        10,
-        7
+        hRingsS,
+        hRadS
       ),
       // 6) Forward-flaring upper cheek needle-whisker spine (distinct icon lateral spikes!)
       createSweptHornOrCrestGeometry(
@@ -1235,8 +1255,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.036,
         0.038,
-        10,
-        7
+        hRingsS,
+        hRadS
       ),
       // 7) Wide mid-cheek radiating lateral whisker-spine
       createSweptHornOrCrestGeometry(
@@ -1247,8 +1267,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.044,
         0.046,
-        10,
-        7
+        hRingsS,
+        hRadS
       ),
       // 8) Lower-cheek radiating gill-spine
       createSweptHornOrCrestGeometry(
@@ -1259,8 +1279,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.045,
         0.045,
-        10,
-        7
+        hRingsS,
+        hRadS
       ),
       // 9) Upper temporal sub-wing spur tucked beneath main spear horn
       createSweptHornOrCrestGeometry(
@@ -1271,8 +1291,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.04,
         0.042,
-        10,
-        7
+        hRingsS,
+        hRadS
       )
     );
   }
@@ -1286,8 +1306,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.044,
       0.066,
-      10,
-      8
+      hRingsS,
+      hRadS
     ),
     createSweptHornOrCrestGeometry(
       [
@@ -1297,8 +1317,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.05,
       0.08,
-      10,
-      8
+      hRingsS,
+      hRadS
     )
   );
   const mergedHornsGeo = mergeGeometries(hornGeos, false);
@@ -1317,8 +1337,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.032,
         0.034,
-        10,
-        7
+        hRingsS,
+        hRadS
       ),
       createSweptHornOrCrestGeometry(
         [
@@ -1328,8 +1348,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.036,
         0.038,
-        10,
-        7
+        hRingsS,
+        hRadS
       ),
       createSweptHornOrCrestGeometry(
         [
@@ -1339,8 +1359,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.026,
         0.028,
-        8,
-        6
+        6,
+        hRadS
       )
     );
   }
@@ -1358,8 +1378,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.048,
       0.092,
-      12,
-      8
+      hRingsM,
+      hRadL
     ),
     createSweptHornOrCrestGeometry(
       [
@@ -1369,8 +1389,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.052,
       0.098,
-      12,
-      8
+      hRingsM,
+      hRadL
     ),
     createSweptHornOrCrestGeometry(
       [
@@ -1380,20 +1400,20 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.05,
       0.092,
-      10,
-      8
+      hRingsS,
+      hRadL
     ),
   ];
   const headCrestGeo = tagShared(mergeGeometries(crestParts, false) ?? new THREE.BufferGeometry());
   crestParts.forEach((g) => g.dispose());
 
-  const eyeballGeo = tagShared(new THREE.SphereGeometry(0.148, 24, 18));
+  const eyeballGeo = tagShared(new THREE.SphereGeometry(0.148, compact ? 14 : 18, compact ? 10 : 14));
   eyeballGeo.rotateY(-Math.PI / 2);
-  const corneaGeo = tagShared(new THREE.SphereGeometry(0.155, 20, 14));
+  const corneaGeo = tagShared(new THREE.SphereGeometry(0.155, compact ? 12 : 14, compact ? 8 : 10));
 
-  const fangGeo = createRecurvedToothGeometry(0.32, 0.038, 0.095);
-  const toothGeo = createRecurvedToothGeometry(0.185, 0.023, 0.05);
-  const palatineToothGeo = createRecurvedToothGeometry(0.135, 0.017, 0.036);
+  const fangGeo = createRecurvedToothGeometry(0.32, 0.038, 0.095, compact);
+  const toothGeo = createRecurvedToothGeometry(0.185, 0.023, 0.05, compact);
+  const palatineToothGeo = createRecurvedToothGeometry(0.135, 0.017, 0.036, compact);
 
   const bakeTransformedTooth = (
     src: THREE.BufferGeometry,
@@ -1460,7 +1480,7 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
   upperTeethParts.forEach((g) => g.dispose());
   if (mergedUpperTeeth) tagShared(mergedUpperTeeth);
 
-  const lowerJawGeo = tagShared(sculptLowerJawGeometry());
+  const lowerJawGeo = tagShared(sculptLowerJawGeometry(compact));
   const sublingualGeo = tagShared(
     createSweptHornOrCrestGeometry(
       [
@@ -1470,8 +1490,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.2,
       0.042,
-      10,
-      10
+      hRingsS,
+      compact ? 6 : 8
     )
   );
 
@@ -1529,8 +1549,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.055,
       0.095,
-      8,
-      8
+      6,
+      hRadL
     )
   );
 
@@ -1543,8 +1563,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
       ],
       0.04,
       0.022,
-      10,
-      8
+      hRingsS,
+      hRadL
     ),
   ];
   for (const side of [-1, 1] as const) {
@@ -1557,8 +1577,8 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
         ],
         0.018,
         0.012,
-        8,
-        6
+        6,
+        hRadS
       )
     );
   }
@@ -1566,7 +1586,7 @@ function getMonsterPool(textures: TextureBundle): MonsterSharedPool {
   tongueParts.forEach((g) => g.dispose());
   if (mergedTongueGeo) tagShared(mergedTongueGeo);
 
-  const wakeRingGeo = tagShared(new THREE.RingGeometry(1.15, 2.45, 36));
+  const wakeRingGeo = tagShared(new THREE.RingGeometry(1.15, 2.45, compact ? 20 : 28));
 
   const mPool: MonsterSharedPool = {
     skinMat,
@@ -1644,8 +1664,8 @@ export function createMonsterRig(textures: TextureBundle, scale = 1): MonsterRig
   let scaled = pool.scaledBodies.get(scaleKey);
   if (!scaled) {
     const bodyGeo = tagShared(buildContinuousSerpentBodyGeometry(scale, Boolean(textures.compact)));
-    const finGeo = tagShared(buildContinuousDorsalFinGeometry(scale));
-    const bowGeo = tagShared(new THREE.PlaneGeometry(3.8 * scale, 7.5 * scale, 12, 16));
+    const finGeo = tagShared(buildContinuousDorsalFinGeometry(scale, Boolean(textures.compact)));
+    const bowGeo = tagShared(new THREE.PlaneGeometry(3.8 * scale, 7.5 * scale, textures.compact ? 8 : 10, textures.compact ? 10 : 12));
     bowGeo.rotateX(-Math.PI / 2);
     const bPos = bowGeo.attributes.position as THREE.BufferAttribute;
     for (let i = 0; i < bPos.count; i++) {
@@ -1858,6 +1878,8 @@ export function resetSerpentTrail(rig: MonsterRig, headPos: THREE.Vector3, yaw: 
   rig.torso.rotation.set(0, 0, 0);
   rig.headGroup.rotation.set(0, 0, 0);
   rig.jaw.rotation.x = 0.06;
+  rig.leftEye.rotation.set(0, -0.52, 0);
+  rig.rightEye.rotation.set(0, 0.52, 0);
 
   for (let i = 0; i < rig.segments.length; i++) {
     const seg = rig.segments[i];
@@ -1944,9 +1966,67 @@ const _tmpPreyBasisMat = new THREE.Matrix4().makeBasis(
   new THREE.Vector3(0, 1, 0)
 );
 const _tmpPreyBasisQuat = new THREE.Quaternion().setFromRotationMatrix(_tmpPreyBasisMat);
+const _tmpPreyMouthQuat = new THREE.Quaternion();
 const _tmpPreyStartQuat = new THREE.Quaternion();
-const _tmpPreyTiltQuat = new THREE.Quaternion();
+const _tmpPreyTumbleQuat = new THREE.Quaternion();
 const _tmpPreyEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _tmpComWorld = new THREE.Vector3();
+const _tmpComOffset = new THREE.Vector3();
+const _tmpAirTarget = new THREE.Vector3();
+const _tmpAirOffset = new THREE.Vector3();
+
+export const SERPENT_DEVOUR_AIR_START = 0.14;
+export const SERPENT_DEVOUR_AIR_END = 0.46;
+
+export interface SerpentAirborneArc {
+  active: boolean;
+  tAir: number;
+  forwardOffset: number;
+  lateralOffset: number;
+  verticalOffset: number;
+}
+
+export function computeSerpentDevourAirborneLift(
+  eatProgress: number,
+  scale: number,
+  waterY: number,
+  ceilingY = Infinity
+): SerpentAirborneArc {
+  const u = THREE.MathUtils.clamp(eatProgress, 0, 1);
+  if (u <= SERPENT_DEVOUR_AIR_START || u >= SERPENT_DEVOUR_AIR_END) {
+    return {
+      active: false,
+      tAir: u <= SERPENT_DEVOUR_AIR_START ? 0 : 1,
+      forwardOffset: 0,
+      lateralOffset: 0,
+      verticalOffset: 0,
+    };
+  }
+  const tAir = THREE.MathUtils.clamp(
+    (u - SERPENT_DEVOUR_AIR_START) / (SERPENT_DEVOUR_AIR_END - SERPENT_DEVOUR_AIR_START),
+    0,
+    1
+  );
+  // Symmetric ballistic parabola (0 at release & catch, 1 at apex u=0.30)
+  const arc = 4 * tAir * (1 - tAir);
+  const sinArc = Math.sin(tAir * Math.PI);
+  const forwardOffset = sinArc * 1.18 * scale;
+  // Subtle lateral drift forces visible neck/skull yaw tracking alongside upward pitch
+  const lateralOffset = sinArc * 0.34 * scale;
+  const mouthBaseY = waterY + 2.25 * scale;
+  const rawLift = 2.9 * scale + 0.55;
+  const maxSafeLift = Number.isFinite(ceilingY)
+    ? Math.max(0.75 * scale, ceilingY - 1.25 - mouthBaseY)
+    : rawLift;
+  const verticalOffset = arc * Math.min(rawLift, maxSafeLift);
+  return {
+    active: true,
+    tAir,
+    forwardOffset,
+    lateralOffset,
+    verticalOffset,
+  };
+}
 
 export function animateMonsterRig(
   rig: MonsterRig,
@@ -1961,7 +2041,8 @@ export function animateMonsterRig(
   eatProgress = -1,
   intimidation?: SerpentIntimidationAnim | null,
   floorY = -Infinity,
-  skipBoneSync = false
+  skipBoneSync = false,
+  ceilingY = Infinity
 ): void {
   const safeDt = Math.min(0.06, Math.max(0.001, dt));
   const k = Math.min(1, safeDt * 14);
@@ -2022,11 +2103,12 @@ export function animateMonsterRig(
   );
 
   const effectiveTargetEmerge = isEating
-    ? THREE.MathUtils.smoothstep(eatU, 0, 0.14) * (1 - THREE.MathUtils.smoothstep(eatU, 0.9, 1.0) * 0.25)
+    ? (0.42 + 0.58 * THREE.MathUtils.smoothstep(eatU, 0, 0.11)) *
+      (1 - THREE.MathUtils.smoothstep(eatU, 0.88, 1.0) * 0.28)
     : isIntimTower
       ? intimHeightTarget
       : targetEmerge;
-  const emergeLerpRate = isEating ? 18 : isIntimTower ? 6.2 : 11;
+  const emergeLerpRate = isEating ? 20 : isIntimTower ? 6.2 : 11;
   rig.emergeAmount = THREE.MathUtils.lerp(
     rig.emergeAmount,
     effectiveTargetEmerge,
@@ -2036,7 +2118,7 @@ export function animateMonsterRig(
   // Speed-coupled swimming propulsion wave (slow eerie water tread while towering/staring)
   const speedNorm = THREE.MathUtils.clamp(rig.smoothedSpeed / (6.5 * rig.scale), 0, 1.8);
   const waveSpeed = isEating
-    ? 8.8
+    ? 8.2
     : isIntimTower
       ? 2.2
       : isChasing
@@ -2045,12 +2127,34 @@ export function animateMonsterRig(
   rig.swimPhase = (rig.swimPhase + safeDt * waveSpeed) % (Math.PI * 200);
 
   const patrolBob = Math.sin(rig.swimPhase * 0.55) * 0.07;
-  const emergeHeightScale = isEating ? 1.58 : THREE.MathUtils.lerp(1.52, 3.12, rig.intimidationBlend);
+  const eatAirTower = isEating
+    ? THREE.MathUtils.smoothstep(eatU, 0.08, 0.24) * (1 - THREE.MathUtils.smoothstep(eatU, 0.52, 0.86) * 0.45)
+    : 0;
+  const emergeHeightScale = isEating
+    ? THREE.MathUtils.lerp(1.58, 2.18, eatAirTower)
+    : THREE.MathUtils.lerp(1.52, 3.12, rig.intimidationBlend);
   const emergeLift = rig.emergeAmount * emergeHeightScale * rig.scale;
   const swimSubmerge = isChasing ? -0.24 * (1 - rig.emergeAmount) * rig.scale : -0.04 * rig.scale;
-  const eatHeave = isEating
-    ? (Math.sin(eatU * Math.PI * 4.5) * 0.11 * (1 - eatU * 0.4)) * rig.scale
-    : 0;
+
+  let eatHeave = 0;
+  if (isEating) {
+    if (eatU < 0.06) {
+      eatHeave = -0.14 * THREE.MathUtils.smoothstep(eatU, 0, 0.06) * rig.scale;
+    } else if (eatU < 0.14) {
+      eatHeave = THREE.MathUtils.lerp(-0.14, 0.26, THREE.MathUtils.smoothstep(eatU, 0.06, 0.14)) * rig.scale;
+    } else if (eatU < 0.46) {
+      const catchReach = THREE.MathUtils.smoothstep(eatU, 0.30, 0.46) * 0.22;
+      eatHeave = (0.26 + catchReach) * rig.scale;
+    } else if (eatU < 0.58) {
+      const impact = Math.sin(THREE.MathUtils.clamp((eatU - 0.46) / 0.12, 0, 1) * Math.PI);
+      eatHeave = (0.36 - impact * 0.32) * rig.scale;
+    } else {
+      const g1 = Math.sin(THREE.MathUtils.clamp((eatU - 0.58) / 0.16, 0, 1) * Math.PI);
+      const g2 = Math.sin(THREE.MathUtils.clamp((eatU - 0.74) / 0.16, 0, 1) * Math.PI);
+      eatHeave = (0.14 - THREE.MathUtils.smoothstep(eatU, 0.58, 0.98) * 0.18 + (g1 + g2 * 0.85) * 0.15) * rig.scale;
+    }
+  }
+
   const intimHeave =
     intimPhase === 'staring'
       ? Math.sin(time * 2.5) * 0.068 * rig.scale
@@ -2075,46 +2179,113 @@ export function animateMonsterRig(
   let targetJawX = 0.06;
 
   if (isEating) {
-    if (eatU < 0.16) {
-      const p = THREE.MathUtils.smoothstep(eatU, 0, 0.16);
-      targetHeadPitch = THREE.MathUtils.lerp(-0.12, 0.06, p);
-      targetJawX = THREE.MathUtils.lerp(0.55, 1.08, p);
-    } else if (eatU < 0.36) {
-      const p = THREE.MathUtils.smoothstep(eatU, 0.16, 0.36);
-      targetHeadPitch = THREE.MathUtils.lerp(0.06, -0.26, p);
-      const thrash = Math.sin((eatU - 0.16) * 28) * 0.16 * (1 - p * 0.4);
-      targetTorsoYaw = thrash * 0.28;
-      targetHeadYaw = thrash * 0.72;
-      targetJawX = THREE.MathUtils.lerp(1.08, 0.54, p);
-    } else if (eatU < 0.88) {
-      const p = (eatU - 0.36) / 0.52;
-      const gulpPulse1 = Math.sin(THREE.MathUtils.clamp((eatU - 0.38) / 0.24, 0, 1) * Math.PI);
-      const gulpPulse2 = Math.sin(THREE.MathUtils.clamp((eatU - 0.62) / 0.24, 0, 1) * Math.PI);
-      targetHeadPitch = -0.32 - gulpPulse1 * 0.18 - gulpPulse2 * 0.16 - p * 0.06;
-      const sway = Math.sin(p * Math.PI * 3.0) * 0.08;
-      targetTorsoYaw = sway * 0.25;
-      targetHeadYaw = sway * 0.75;
+    let eyeTrackPitch = 0;
+    let eyeConvYaw = 0;
+    let jawSpeed = 24;
+
+    if (eatU < 0.06) {
+      // Act 1a: Strike & snap jaws onto the victim
+      const p = THREE.MathUtils.smoothstep(eatU, 0, 0.06);
+      targetHeadPitch = THREE.MathUtils.lerp(0.06, -0.14, p);
+      targetHeadRoll = THREE.MathUtils.lerp(0, 0.06, p);
+      targetJawX = THREE.MathUtils.lerp(0.76, 0.24, p);
+      jawSpeed = 30;
+    } else if (eatU < SERPENT_DEVOUR_AIR_START) {
+      // Act 1b: Powerful muscular neck whip upward, releasing victim skyward
+      const p = THREE.MathUtils.smoothstep(eatU, 0.06, SERPENT_DEVOUR_AIR_START);
+      targetHeadPitch = THREE.MathUtils.lerp(-0.14, -0.68, p);
+      targetTorsoYaw = Math.sin(p * Math.PI) * 0.09;
+      targetHeadYaw = Math.sin(p * Math.PI) * 0.13;
+      targetHeadRoll = THREE.MathUtils.lerp(0.06, -0.05, p);
+      targetJawX = THREE.MathUtils.lerp(0.24, 0.62, Math.pow(p, 1.35));
+      eyeTrackPitch = THREE.MathUtils.lerp(0, -0.12, p);
+      jawSpeed = 28;
+    } else if (eatU < SERPENT_DEVOUR_AIR_END) {
+      // Act 2: Continuous skyward head & eye tracking through launch, apex & fall into gaping jaws
+      const air = computeSerpentDevourAirborneLift(eatU, rig.scale, waterY, ceilingY);
+      const fwdX = Math.sin(headYaw);
+      const fwdZ = Math.cos(headYaw);
+      const rightX = Math.cos(headYaw);
+      const rightZ = -Math.sin(headYaw);
+
+      _tmpAirTarget.set(
+        headWorldPos.x + fwdX * (0.72 * rig.scale + air.forwardOffset) + rightX * air.lateralOffset,
+        waterY + 2.25 * rig.scale + air.verticalOffset,
+        headWorldPos.z + fwdZ * (0.72 * rig.scale + air.forwardOffset) + rightZ * air.lateralOffset
+      );
+
+      const skullPivotY = headWorldPos.y + headLocalY + 0.22 * rig.scale;
+      const relX = _tmpAirTarget.x - headWorldPos.x;
+      const relY = _tmpAirTarget.y - skullPivotY;
+      const relZ = _tmpAirTarget.z - headWorldPos.z;
+      const localX = relX * rightX + relZ * rightZ;
+      const localZ = relX * fwdX + relZ * fwdZ;
+      const horizDist = Math.max(0.42 * rig.scale, Math.hypot(localX, localZ));
+
+      const trackYaw = THREE.MathUtils.clamp(Math.atan2(localX, localZ), -0.95, 0.95);
+      const trackPitch = THREE.MathUtils.clamp(-Math.atan2(relY, horizDist), -1.16, 0.28);
+      const trackBlend = THREE.MathUtils.smoothstep(eatU, SERPENT_DEVOUR_AIR_START, 0.20);
+
+      targetTorsoYaw = trackYaw * 0.28;
+      targetHeadYaw = trackYaw * 0.72;
+      targetHeadPitch = THREE.MathUtils.lerp(-0.68, trackPitch, trackBlend);
+      targetHeadRoll = Math.sin(air.tAir * Math.PI) * 0.08;
+
+      // Open jaws terrifyingly wide in anticipation as character reaches apex & falls toward maw
+      targetJawX = THREE.MathUtils.lerp(0.62, 1.12, THREE.MathUtils.smoothstep(eatU, 0.16, 0.39));
+      eyeTrackPitch = THREE.MathUtils.clamp(trackPitch * 0.20, -0.22, 0.12);
+      eyeConvYaw = Math.sin(air.tAir * Math.PI) * 0.14;
+      jawSpeed = 20;
+    } else if (eatU < 0.58) {
+      // Act 3: Mid-air jaw interception & crushing bite closure
+      const p = THREE.MathUtils.smoothstep(eatU, SERPENT_DEVOUR_AIR_END, 0.58);
+      const biteShudder = Math.sin((eatU - SERPENT_DEVOUR_AIR_END) * 52) * 0.065 * (1 - p);
+      targetHeadPitch = THREE.MathUtils.lerp(-0.46, -0.22, p);
+      targetTorsoYaw = biteShudder * 0.3;
+      targetHeadYaw = biteShudder * 0.7;
+      targetHeadRoll = THREE.MathUtils.lerp(0.05, 0, p);
+      targetJawX = THREE.MathUtils.lerp(1.12, 0.22, Math.pow(p, 0.68));
+      eyeTrackPitch = THREE.MathUtils.lerp(-0.08, 0, p);
+      eyeConvYaw = THREE.MathUtils.lerp(0.08, 0, p);
+      jawSpeed = 34;
+    } else if (eatU < 0.90) {
+      // Act 4: Realistic rhythmic upward gulp throws driving prey down the esophagus
+      const p = (eatU - 0.58) / 0.32;
+      const gulpPulse1 = Math.sin(THREE.MathUtils.clamp((eatU - 0.58) / 0.16, 0, 1) * Math.PI);
+      const gulpPulse2 = Math.sin(THREE.MathUtils.clamp((eatU - 0.74) / 0.16, 0, 1) * Math.PI);
+      targetHeadPitch = -0.22 - gulpPulse1 * 0.34 - gulpPulse2 * 0.28 - p * 0.06;
+      const sway = Math.sin(p * Math.PI * 2.4) * 0.08;
+      targetTorsoYaw = sway * 0.26;
+      targetHeadYaw = sway * 0.74;
       targetJawX =
-        THREE.MathUtils.lerp(0.52, 0.16, THREE.MathUtils.smoothstep(p, 0, 1)) +
-        gulpPulse1 * 0.16 +
-        gulpPulse2 * 0.13;
+        THREE.MathUtils.lerp(0.22, 0.08, THREE.MathUtils.smoothstep(p, 0, 1)) +
+        gulpPulse1 * 0.18 +
+        gulpPulse2 * 0.14;
+      jawSpeed = 24;
     } else {
-      const p = THREE.MathUtils.smoothstep(eatU, 0.88, 1.0);
-      targetHeadPitch = THREE.MathUtils.lerp(-0.38, -0.1, p);
+      const p = THREE.MathUtils.smoothstep(eatU, 0.90, 1.0);
+      targetHeadPitch = THREE.MathUtils.lerp(-0.28, -0.10, p);
       targetTorsoYaw = 0;
       targetHeadYaw = 0;
-      targetJawX = THREE.MathUtils.lerp(0.18, 0.05, p);
+      targetJawX = THREE.MathUtils.lerp(0.10, 0.06, p);
+      jawSpeed = 18;
     }
 
-    const eatK = Math.min(1, safeDt * 18);
+    const eatK = Math.min(1, safeDt * 24);
     rig.torso.rotation.y = THREE.MathUtils.lerp(rig.torso.rotation.y, targetTorsoYaw, eatK);
     rig.headGroup.rotation.y = THREE.MathUtils.lerp(rig.headGroup.rotation.y, targetHeadYaw, eatK);
     rig.headGroup.rotation.x = THREE.MathUtils.lerp(rig.headGroup.rotation.x, targetHeadPitch, eatK);
-    rig.headGroup.rotation.z = THREE.MathUtils.lerp(rig.headGroup.rotation.z, 0, eatK);
-    rig.jaw.rotation.x = THREE.MathUtils.lerp(rig.jaw.rotation.x, targetJawX, Math.min(1, safeDt * 22));
-    rig.leftEye.rotation.y = -0.52;
-    rig.rightEye.rotation.y = 0.52;
-    rig.tongue.position.z = THREE.MathUtils.lerp(rig.tongue.position.z, 0.12, eatK);
+    rig.headGroup.rotation.z = THREE.MathUtils.lerp(rig.headGroup.rotation.z, targetHeadRoll, eatK);
+    rig.jaw.rotation.x = THREE.MathUtils.lerp(rig.jaw.rotation.x, targetJawX, Math.min(1, safeDt * jawSpeed));
+
+    const eyeYawOff = THREE.MathUtils.clamp(targetHeadYaw * 0.26, -0.18, 0.18);
+    rig.leftEye.rotation.y = -0.52 + eyeYawOff + eyeConvYaw;
+    rig.rightEye.rotation.y = 0.52 + eyeYawOff - eyeConvYaw;
+    rig.leftEye.rotation.x = THREE.MathUtils.lerp(rig.leftEye.rotation.x, eyeTrackPitch, eatK);
+    rig.rightEye.rotation.x = THREE.MathUtils.lerp(rig.rightEye.rotation.x, eyeTrackPitch, eatK);
+
+    const tongueRetract = eatU > SERPENT_DEVOUR_AIR_START && eatU < 0.52 ? 0.36 : 0.12;
+    rig.tongue.position.z = THREE.MathUtils.lerp(rig.tongue.position.z, tongueRetract, eatK);
     rig.tongue.rotation.y = 0;
   } else if (isIntimTower) {
     const relX = playerWorldPos.x - headWorldPos.x;
@@ -2183,6 +2354,8 @@ export function animateMonsterRig(
     const eyeYawOff = THREE.MathUtils.clamp(targetHeadYaw * 0.22, -0.16, 0.16);
     rig.leftEye.rotation.y = -0.52 + eyeYawOff;
     rig.rightEye.rotation.y = 0.52 + eyeYawOff;
+    rig.leftEye.rotation.x = 0;
+    rig.rightEye.rotation.x = 0;
 
     const slowFlick =
       intimPhase === 'lowering'
@@ -2219,6 +2392,8 @@ export function animateMonsterRig(
     const eyeYawOff = THREE.MathUtils.clamp(targetHeadYaw * 0.18, -0.12, 0.12);
     rig.leftEye.rotation.y = -0.52 + eyeYawOff;
     rig.rightEye.rotation.y = 0.52 + eyeYawOff;
+    rig.leftEye.rotation.x = 0;
+    rig.rightEye.rotation.x = 0;
 
     const snapFreq = rig.lungeAmount > 0.2 ? 17 : 11;
     targetJawX = isChasing
@@ -2239,7 +2414,7 @@ export function animateMonsterRig(
   );
   rig.headAssembly.rotation.y = headYaw;
   rig.torso.rotation.z = isEating
-    ? Math.sin(eatU * Math.PI * 5.0) * 0.16 * (1 - eatU * 0.55)
+    ? Math.sin(eatU * Math.PI * 4.5) * 0.11 * (1 - eatU * 0.55)
     : isIntimTower
       ? THREE.MathUtils.lerp(
           rig.torso.rotation.z,
@@ -2264,8 +2439,9 @@ export function animateMonsterRig(
   seg0.roll = rig.torso.rotation.z * 0.72;
   seg0.bone.position.set(headOffX, neckAnchorY, headOffZ);
 
-  const bulgeWave = isEating ? THREE.MathUtils.clamp((eatU - 0.4) / 0.58, 0, 1) : -1;
-  const bulgeCenter = bulgeWave >= 0 ? bulgeWave * 6.5 : -10;
+  // Throat peristalsis bulge travels down anterior spine segments as prey is swallowed (eatU 0.54 -> 0.99)
+  const bulgeWave = isEating && eatU >= 0.54 ? THREE.MathUtils.clamp((eatU - 0.54) / 0.45, 0, 1) : -1;
+  const bulgeCenter = bulgeWave >= 0 ? bulgeWave * 6.8 : -10;
 
   for (let i = 1; i < rig.segments.length; i++) {
     const seg = rig.segments[i];
@@ -2314,8 +2490,8 @@ export function animateMonsterRig(
     seg.yaw = Math.atan2(nx, nz);
     seg.pitch = -Math.asin(THREE.MathUtils.clamp(ny, -0.78, 0.78));
 
-    // Towering icon-like neck S-arch during emergence, smoothly dipping beneath water aft of neck (tail stays submerged)
-    const archScale = 1.15 + rig.intimidationBlend * 1.9;
+    // Towering icon-like neck S-arch during emergence & devour tracking
+    const archScale = isEating ? 1.72 : 1.15 + rig.intimidationBlend * 1.9;
     const emergeArch = i <= 6 ? Math.sin((1 - i / 7) * Math.PI * 0.5) * rig.emergeAmount * archScale * rig.scale : 0;
     const maxSegY = waterY - 0.14 * rig.scale + emergeArch;
     if (seg.worldPos.y > maxSegY) {
@@ -2358,7 +2534,7 @@ export function animateMonsterRig(
 
     const maxSubmergedY =
       i <= 6
-        ? waterY + (1.05 + rig.intimidationBlend * 2.05) * rig.scale
+        ? waterY + (1.05 + Math.max(rig.intimidationBlend * 2.05, isEating ? 0.75 : 0)) * rig.scale
         : isIntimTower
           ? waterY - 0.14 * rig.scale
           : waterY + 1.05 * rig.scale;
@@ -2386,14 +2562,15 @@ export function animateMonsterRig(
     seg.roll = Math.cos(phase) * (0.06 + t * 0.2) * (isChasing ? 1.3 : 0.78) + bankRoll * (1 - t * 0.65);
   }
 
-  // Organic throat swallow bulge across anterior bones
+  // Organic throat swallow bulge peristalsis expanding & contracting anterior neck bones
   for (let i = 0; i < rig.segments.length; i++) {
     const bone = rig.segments[i].bone;
     if (isEating && i <= 7 && bulgeWave >= 0) {
       const distB = i - bulgeCenter;
-      const b = Math.exp(-(distB * distB) / 2.2) * Math.sin(bulgeWave * Math.PI);
-      const s = 1 + b * 0.28;
-      bone.scale.set(s, s * (1 + b * 0.06), 1);
+      const gulpMod = 0.85 + 0.2 * Math.sin(bulgeWave * Math.PI * 2.5);
+      const b = Math.exp(-(distB * distB) / 2.4) * Math.sin(bulgeWave * Math.PI) * gulpMod;
+      const s = 1 + Math.max(0, b) * 0.34;
+      bone.scale.set(s, s * (1 + Math.max(0, b) * 0.08), 1);
     } else if (bone.scale.x !== 1 || bone.scale.y !== 1) {
       bone.scale.set(1, 1, 1);
     }
@@ -2442,7 +2619,8 @@ export function attachPreyToSerpentMouth(
   dt: number,
   startWorldPos?: THREE.Vector3 | null,
   startYaw = 0,
-  skipMatrixUpdate = false
+  skipMatrixUpdate = false,
+  ceilingY = Infinity
 ): void {
   const u = THREE.MathUtils.clamp(eatProgress, 0, 1);
   if (!skipMatrixUpdate) {
@@ -2450,55 +2628,118 @@ export function attachPreyToSerpentMouth(
   }
   monsterRig.headGroup.matrixWorld.decompose(_tmpPreyWorldPos, _tmpPreyHeadQuat, _tmpPreyHeadScale);
 
-  let localZ = 0.08;
-  if (u < 0.16) {
-    localZ = THREE.MathUtils.lerp(0.42, -0.08, THREE.MathUtils.smoothstep(u, 0, 0.16));
-  } else if (u < 0.36) {
-    localZ = THREE.MathUtils.lerp(-0.08, -0.22, THREE.MathUtils.smoothstep(u, 0.16, 0.36));
-  } else if (u < 0.88) {
-    const p = (u - 0.36) / 0.52;
-    const gulpStep = Math.sin(p * Math.PI * 2.0) * 0.05;
-    localZ = THREE.MathUtils.lerp(-0.22, -0.68, THREE.MathUtils.smoothstep(p, 0, 1)) - Math.max(0, gulpStep);
+  const jawDrop = THREE.MathUtils.clamp(monsterRig.jaw.rotation.x, 0, 1.2);
+  const headYaw = monsterRig.headAssembly.rotation.y;
+  const waterYApprox = monsterRig.root.position.y + 0.14;
+  const air = computeSerpentDevourAirborneLift(u, monsterRig.scale, waterYApprox, ceilingY);
+
+  // Compute Center-of-Mass (hips) target inside serpent headGroup space across all 4 acts
+  let localComZ = 0.72;
+  let localComY = -0.14;
+  let localComX = 0;
+
+  if (u < 0.06) {
+    const p = THREE.MathUtils.smoothstep(u, 0, 0.06);
+    localComZ = THREE.MathUtils.lerp(0.84, 0.68, p);
+    localComY = THREE.MathUtils.lerp(-0.18, -0.14 - jawDrop * 0.12, p);
+  } else if (u < SERPENT_DEVOUR_AIR_START) {
+    const p = THREE.MathUtils.smoothstep(u, 0.06, SERPENT_DEVOUR_AIR_START);
+    localComZ = THREE.MathUtils.lerp(0.68, 0.88, p);
+    localComY = THREE.MathUtils.lerp(-0.14 - jawDrop * 0.12, -0.05, p);
+  } else if (u < SERPENT_DEVOUR_AIR_END) {
+    localComZ = THREE.MathUtils.lerp(0.88, 0.38, THREE.MathUtils.smoothstep(air.tAir, 0, 1));
+    localComY = THREE.MathUtils.lerp(-0.05, -0.22 - jawDrop * 0.14, THREE.MathUtils.smoothstep(air.tAir, 0.45, 1));
+  } else if (u < 0.58) {
+    const p = THREE.MathUtils.smoothstep(u, SERPENT_DEVOUR_AIR_END, 0.58);
+    localComZ = THREE.MathUtils.lerp(0.38, 0.08, p);
+    localComY = THREE.MathUtils.lerp(-0.22 - jawDrop * 0.14, -0.17 - jawDrop * 0.1, p);
+    localComX = Math.sin(time * 28) * 0.025 * (1 - p);
   } else {
-    localZ = THREE.MathUtils.lerp(-0.68, -0.18, THREE.MathUtils.smoothstep(u, 0.88, 1.0));
+    // Progressive gulps pull prey deep down the throat instead of vanishing abruptly in front of teeth
+    const p = THREE.MathUtils.clamp((u - 0.58) / 0.40, 0, 1);
+    const gulp1 = Math.sin(THREE.MathUtils.clamp((u - 0.58) / 0.16, 0, 1) * Math.PI);
+    const gulp2 = Math.sin(THREE.MathUtils.clamp((u - 0.74) / 0.16, 0, 1) * Math.PI);
+    const gulpSurge = (gulp1 + gulp2) * 0.06;
+    localComZ = THREE.MathUtils.lerp(0.08, -1.95, THREE.MathUtils.smoothstep(p, 0, 1)) - gulpSurge;
+    localComY = THREE.MathUtils.lerp(-0.17 - jawDrop * 0.08, -0.04, THREE.MathUtils.smoothstep(p, 0, 0.72));
   }
 
-  const jawDrop = THREE.MathUtils.clamp(monsterRig.jaw.rotation.x, 0, 1.15);
-  const localY = -0.04 - jawDrop * 0.19;
-  const struggleX = u < 0.55 ? Math.sin(time * 26) * 0.035 * (1 - u) : 0;
-
-  _tmpPreyLocal.set(struggleX, localY, localZ);
+  _tmpPreyLocal.set(localComX, localComY, localComZ);
   _tmpPreyLocal.applyMatrix4(monsterRig.headGroup.matrixWorld);
 
-  _tmpPreyWorldQuat.copy(_tmpPreyHeadQuat).multiply(_tmpPreyBasisQuat);
-  if (u < 0.55) {
-    _tmpPreyEuler.set(0, Math.sin(time * 18) * 0.08 * (1 - u), Math.cos(time * 22) * 0.09 * (1 - u));
-    _tmpPreyTiltQuat.setFromEuler(_tmpPreyEuler);
-    _tmpPreyWorldQuat.multiply(_tmpPreyTiltQuat);
+  if (air.active) {
+    const fwdX = Math.sin(headYaw);
+    const fwdZ = Math.cos(headYaw);
+    const rightX = Math.cos(headYaw);
+    const rightZ = -Math.sin(headYaw);
+    _tmpAirOffset.set(
+      fwdX * air.forwardOffset + rightX * air.lateralOffset,
+      air.verticalOffset,
+      fwdZ * air.forwardOffset + rightZ * air.lateralOffset
+    );
+    _tmpPreyLocal.add(_tmpAirOffset);
   }
 
-  const grabBlend = THREE.MathUtils.smoothstep(u, 0, 0.16);
+  // Continuous Center-of-Mass rotation from standing -> upward launch -> natural ballistic tumble -> open-mouth catch
+  _tmpPreyMouthQuat.copy(_tmpPreyHeadQuat).multiply(_tmpPreyBasisQuat);
+  let pitchTumble = 0;
+  let yawTumble = 0;
+  let rollTumble = 0;
+  if (u < SERPENT_DEVOUR_AIR_START) {
+    pitchTumble = Math.PI * 0.44;
+    rollTumble = 0.14 * THREE.MathUtils.smoothstep(u, 0.04, SERPENT_DEVOUR_AIR_START);
+  } else if (u < SERPENT_DEVOUR_AIR_END) {
+    // Smooth 280-degree natural backwards tumble through apex, settling seamlessly into _tmpPreyMouthQuat at tAir=1
+    const spinEase = THREE.MathUtils.lerp(air.tAir, THREE.MathUtils.smoothstep(air.tAir, 0, 1), 0.35);
+    pitchTumble = THREE.MathUtils.lerp(Math.PI * 0.44, Math.PI * 2.0, spinEase);
+    rollTumble = Math.sin(air.tAir * Math.PI) * 0.34 + (1 - air.tAir) * 0.14;
+    yawTumble = Math.sin(air.tAir * Math.PI * 1.15) * 0.24;
+  } else if (u < 0.74) {
+    const wFade = 1 - THREE.MathUtils.smoothstep(u, 0.46, 0.74);
+    yawTumble = Math.sin(time * 20) * 0.06 * wFade;
+    rollTumble = Math.cos(time * 24) * 0.07 * wFade;
+  }
+
+  _tmpPreyEuler.set(pitchTumble, yawTumble, rollTumble, 'YXZ');
+  _tmpPreyTumbleQuat.setFromEuler(_tmpPreyEuler);
+  _tmpPreyWorldQuat.copy(_tmpPreyMouthQuat).multiply(_tmpPreyTumbleQuat);
+
+  const grabBlend = THREE.MathUtils.smoothstep(u, 0, 0.09);
   if (startWorldPos && grabBlend < 1) {
-    _tmpPreyWorldPos.lerpVectors(startWorldPos, _tmpPreyLocal, grabBlend);
-    _tmpPreyEuler.set(0, startYaw, 0);
+    _tmpPreyEuler.set(0, startYaw, 0, 'YXZ');
     _tmpPreyStartQuat.setFromEuler(_tmpPreyEuler);
     preyRig.root.quaternion.copy(_tmpPreyStartQuat).slerp(_tmpPreyWorldQuat, grabBlend);
   } else {
-    _tmpPreyWorldPos.copy(_tmpPreyLocal);
     preyRig.root.quaternion.copy(_tmpPreyWorldQuat);
   }
-  preyRig.root.position.copy(_tmpPreyWorldPos);
 
-  const baseScale = Math.min(1.0, 0.88 * Math.max(0.85, monsterRig.scale));
-  const throatShrink = 1 - THREE.MathUtils.smoothstep(u, 0.58, 0.93) * 0.93;
-  const finalScale = Math.max(0.05, THREE.MathUtils.lerp(1.0, baseScale, grabBlend) * throatShrink);
+  const caughtScale = Math.min(1.0, 0.88 * Math.max(0.85, monsterRig.scale));
+  const flightScaleBlend = THREE.MathUtils.smoothstep(u, SERPENT_DEVOUR_AIR_END - 0.04, 0.58);
+  const preSwallowScale = THREE.MathUtils.lerp(1.0, caughtScale, flightScaleBlend);
+  // Constriction scaling happens only AFTER jaws close and victim slides deep down the esophagus
+  const throatShrink = 1 - THREE.MathUtils.smoothstep(u, 0.60, 0.95) * 0.93;
+  const finalScale = Math.max(0.05, preSwallowScale * throatShrink);
   preyRig.root.scale.setScalar(finalScale);
 
-  // Shock reach/thrash -> swallow constriction -> lifeless limp inside jaws
-  const k = Math.min(1, Math.max(0.001, dt) * 22);
-  const tuck = THREE.MathUtils.smoothstep(u, 0.2, 0.72);
-  const limp = THREE.MathUtils.smoothstep(u, 0.5, 0.85);
-  const flail = (1 - tuck) * Math.sin(time * 24);
+  // Offset root by rotated hip Center-of-Mass so victim tumbles cleanly around torso instead of feet
+  _tmpComOffset.set(0, 0.88 * finalScale, 0).applyQuaternion(preyRig.root.quaternion);
+  if (startWorldPos && grabBlend < 1) {
+    _tmpPreyWorldPos.copy(startWorldPos);
+    _tmpPreyWorldPos.y += 0.88;
+    _tmpComWorld.lerpVectors(_tmpPreyWorldPos, _tmpPreyLocal, grabBlend);
+  } else {
+    _tmpComWorld.copy(_tmpPreyLocal);
+  }
+  preyRig.root.position.copy(_tmpComWorld).sub(_tmpComOffset);
+
+  // Expressive horror limb/torso/head animation synced cleanly for both male and female skeletons
+  const safeDt = Math.max(0.001, Math.min(0.06, dt));
+  const k = Math.min(1, safeDt * 24);
+  const inFlight = u >= SERPENT_DEVOUR_AIR_START && u < SERPENT_DEVOUR_AIR_END;
+  const postCatch = THREE.MathUtils.smoothstep(u, SERPENT_DEVOUR_AIR_END, 0.64);
+  const deepSwallow = THREE.MathUtils.smoothstep(u, 0.62, 0.90);
+  const flailAmt = (inFlight ? 1.0 : 1 - postCatch) * (1 - deepSwallow);
+  const flail = flailAmt * Math.sin(time * 24);
 
   preyRig.hips.position.x = THREE.MathUtils.lerp(preyRig.hips.position.x, 0, k);
   preyRig.hips.position.y = THREE.MathUtils.lerp(preyRig.hips.position.y, 0.92, k);
@@ -2508,29 +2749,80 @@ export function attachPreyToSerpentMouth(
     THREE.MathUtils.lerp(preyRig.hips.rotation.z, 0, k)
   );
 
-  preyRig.torso.rotation.x = THREE.MathUtils.lerp(preyRig.torso.rotation.x, 0.14 * (1 - tuck) - limp * 0.12, k);
-  preyRig.torso.rotation.y = THREE.MathUtils.lerp(preyRig.torso.rotation.y, flail * 0.18, k);
-  preyRig.torso.rotation.z = THREE.MathUtils.lerp(preyRig.torso.rotation.z, Math.cos(time * 18) * 0.08 * (1 - limp), k);
-  preyRig.headGroup.rotation.x = THREE.MathUtils.lerp(preyRig.headGroup.rotation.x, -0.25 + flail * 0.1 + limp * 0.35, k);
-  preyRig.headGroup.rotation.y = THREE.MathUtils.lerp(preyRig.headGroup.rotation.y, 0, k);
+  // Mid-air arch & panic look -> tightly compressed swallow posture inside throat
+  const targetTorsoX = inFlight
+    ? -0.18 + Math.sin(air.tAir * Math.PI) * 0.34
+    : THREE.MathUtils.lerp(0.16, 0.04, deepSwallow);
+  const targetHeadX = inFlight
+    ? 0.24 - Math.cos(air.tAir * Math.PI) * 0.16
+    : THREE.MathUtils.lerp(-0.22, 0.16, deepSwallow);
 
-  preyRig.leftArm.rotation.x = THREE.MathUtils.lerp(preyRig.leftArm.rotation.x, THREE.MathUtils.lerp(-1.2 + flail * 0.45, -0.15, tuck), k);
-  preyRig.rightArm.rotation.x = THREE.MathUtils.lerp(preyRig.rightArm.rotation.x, THREE.MathUtils.lerp(-1.1 - flail * 0.45, -0.15, tuck), k);
-  preyRig.leftArm.rotation.z = THREE.MathUtils.lerp(preyRig.leftArm.rotation.z, THREE.MathUtils.lerp(-0.32, -0.12, tuck), k);
-  preyRig.rightArm.rotation.z = THREE.MathUtils.lerp(preyRig.rightArm.rotation.z, THREE.MathUtils.lerp(0.32, 0.12, tuck), k);
-  preyRig.leftForearm.rotation.x = THREE.MathUtils.lerp(preyRig.leftForearm.rotation.x, THREE.MathUtils.lerp(-0.45, -1.05, tuck), k);
-  preyRig.rightForearm.rotation.x = THREE.MathUtils.lerp(preyRig.rightForearm.rotation.x, THREE.MathUtils.lerp(-0.45, -1.05, tuck), k);
-  preyRig.leftHand.rotation.x = THREE.MathUtils.lerp(preyRig.leftHand.rotation.x, 0.25 * limp, k);
-  preyRig.rightHand.rotation.x = THREE.MathUtils.lerp(preyRig.rightHand.rotation.x, 0.25 * limp, k);
+  preyRig.torso.rotation.x = THREE.MathUtils.lerp(preyRig.torso.rotation.x, targetTorsoX, k);
+  preyRig.torso.rotation.y = THREE.MathUtils.lerp(preyRig.torso.rotation.y, flail * 0.22, k);
+  preyRig.torso.rotation.z = THREE.MathUtils.lerp(preyRig.torso.rotation.z, Math.cos(time * 19) * 0.11 * flailAmt, k);
+  preyRig.headGroup.rotation.x = THREE.MathUtils.lerp(preyRig.headGroup.rotation.x, targetHeadX + flail * 0.08, k);
+  preyRig.headGroup.rotation.y = THREE.MathUtils.lerp(preyRig.headGroup.rotation.y, flail * 0.14, k);
 
-  preyRig.leftLeg.rotation.x = THREE.MathUtils.lerp(preyRig.leftLeg.rotation.x, -0.52 + flail * 0.18, k);
-  preyRig.rightLeg.rotation.x = THREE.MathUtils.lerp(preyRig.rightLeg.rotation.x, -0.48 - flail * 0.18, k);
-  preyRig.leftLeg.rotation.z = THREE.MathUtils.lerp(preyRig.leftLeg.rotation.z, 0, k);
-  preyRig.rightLeg.rotation.z = THREE.MathUtils.lerp(preyRig.rightLeg.rotation.z, 0, k);
-  preyRig.leftShin.rotation.x = THREE.MathUtils.lerp(preyRig.leftShin.rotation.x, 1.05, k);
-  preyRig.rightShin.rotation.x = THREE.MathUtils.lerp(preyRig.rightShin.rotation.x, 1.05, k);
-  preyRig.leftFoot.rotation.x = THREE.MathUtils.lerp(preyRig.leftFoot.rotation.x, 0.45 * tuck, k);
-  preyRig.rightFoot.rotation.x = THREE.MathUtils.lerp(preyRig.rightFoot.rotation.x, 0.45 * tuck, k);
+  const lArmXTarget = inFlight
+    ? -1.45 + flail * 0.55
+    : THREE.MathUtils.lerp(-1.05, -0.08, deepSwallow);
+  const rArmXTarget = inFlight
+    ? -1.32 - flail * 0.55
+    : THREE.MathUtils.lerp(-0.98, -0.08, deepSwallow);
+  const armSpread = inFlight ? 0.52 : THREE.MathUtils.lerp(0.24, 0.09, deepSwallow);
+
+  preyRig.leftArm.rotation.x = THREE.MathUtils.lerp(preyRig.leftArm.rotation.x, lArmXTarget, k);
+  preyRig.rightArm.rotation.x = THREE.MathUtils.lerp(preyRig.rightArm.rotation.x, rArmXTarget, k);
+  preyRig.leftArm.rotation.z = THREE.MathUtils.lerp(preyRig.leftArm.rotation.z, -armSpread, k);
+  preyRig.rightArm.rotation.z = THREE.MathUtils.lerp(preyRig.rightArm.rotation.z, armSpread, k);
+  preyRig.leftForearm.rotation.x = THREE.MathUtils.lerp(
+    preyRig.leftForearm.rotation.x,
+    inFlight ? -0.45 + Math.cos(time * 22) * 0.25 : THREE.MathUtils.lerp(-0.95, -0.25, deepSwallow),
+    k
+  );
+  preyRig.rightForearm.rotation.x = THREE.MathUtils.lerp(
+    preyRig.rightForearm.rotation.x,
+    inFlight ? -0.45 - Math.cos(time * 22) * 0.25 : THREE.MathUtils.lerp(-0.95, -0.25, deepSwallow),
+    k
+  );
+  preyRig.leftHand.rotation.x = THREE.MathUtils.lerp(preyRig.leftHand.rotation.x, 0.18 * deepSwallow, k);
+  preyRig.rightHand.rotation.x = THREE.MathUtils.lerp(preyRig.rightHand.rotation.x, 0.18 * deepSwallow, k);
+
+  const kickL = inFlight ? -0.42 + Math.sin(time * 26) * 0.42 : THREE.MathUtils.lerp(-0.48, 0.06, deepSwallow);
+  const kickR = inFlight ? -0.36 - Math.sin(time * 26) * 0.42 : THREE.MathUtils.lerp(-0.44, 0.06, deepSwallow);
+  const shinBend = inFlight ? 0.72 : THREE.MathUtils.lerp(1.12, 0.14, deepSwallow);
+  preyRig.leftLeg.rotation.x = THREE.MathUtils.lerp(preyRig.leftLeg.rotation.x, kickL, k);
+  preyRig.rightLeg.rotation.x = THREE.MathUtils.lerp(preyRig.rightLeg.rotation.x, kickR, k);
+  preyRig.leftLeg.rotation.z = THREE.MathUtils.lerp(preyRig.leftLeg.rotation.z, inFlight ? 0.14 : 0.02, k);
+  preyRig.rightLeg.rotation.z = THREE.MathUtils.lerp(preyRig.rightLeg.rotation.z, inFlight ? -0.14 : -0.02, k);
+  preyRig.leftShin.rotation.x = THREE.MathUtils.lerp(preyRig.leftShin.rotation.x, shinBend, k);
+  preyRig.rightShin.rotation.x = THREE.MathUtils.lerp(preyRig.rightShin.rotation.x, shinBend, k);
+  preyRig.leftFoot.rotation.x = THREE.MathUtils.lerp(preyRig.leftFoot.rotation.x, THREE.MathUtils.lerp(0.28, 0.62, deepSwallow), k);
+  preyRig.rightFoot.rotation.x = THREE.MathUtils.lerp(preyRig.rightFoot.rotation.x, THREE.MathUtils.lerp(0.28, 0.62, deepSwallow), k);
+
+  // Smooth hair simulation so female & male hair reacts naturally to airborne launch & tucks cleanly in jaws
+  if (preyRig.hairNodes.length > 0) {
+    const goalHairPitch = inFlight
+      ? THREE.MathUtils.lerp(-0.72, 0.32, air.tAir)
+      : u < SERPENT_DEVOUR_AIR_START
+        ? -0.42
+        : -0.16;
+    const goalHairRoll = flailAmt * Math.cos(time * 14) * 0.22;
+    preyRig.hairPitch = THREE.MathUtils.lerp(preyRig.hairPitch, goalHairPitch, Math.min(1, safeDt * 14));
+    preyRig.hairRoll = THREE.MathUtils.lerp(preyRig.hairRoll, goalHairRoll, Math.min(1, safeDt * 14));
+    for (let i = 0; i < preyRig.hairNodes.length; i++) {
+      const hn = preyRig.hairNodes[i];
+      const wave = flailAmt * Math.sin(time * 16 + hn.phaseOffset) * 0.1;
+      const localPitch = THREE.MathUtils.clamp(
+        preyRig.hairPitch * hn.pitchFactor + wave,
+        hn.maxBackwardPitch,
+        hn.maxForwardPitch
+      );
+      hn.group.rotation.x = hn.restPitch + localPitch;
+      hn.group.rotation.y = hn.restYaw;
+      hn.group.rotation.z = hn.restRoll + preyRig.hairRoll * hn.rollFactor;
+    }
+  }
 
   const headBaseY = 0.09 + 0.54 * Math.cos(preyRig.torso.rotation.x);
   const headBaseZ = 0.54 * Math.sin(preyRig.torso.rotation.x);

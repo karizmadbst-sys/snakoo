@@ -5,11 +5,13 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { SoundEngine } from './audio';
+import { setCharacterTextureAnisotropy } from './characters';
 import {
   animateMonsterRig,
   animatePlayerRig,
   attachPreyToSerpentMouth,
   CheckpointVisual,
+  computeSerpentDevourAirborneLift,
   createCheckpointVisual,
   createExitGateMesh,
   createMonsterRig,
@@ -50,6 +52,7 @@ import {
   normalizeCharacterId,
   normalizeQualityPreset,
   PlatformDef,
+  sanitizeGameSettings,
 } from './types';
 import {
   EAT_DURATION_MS,
@@ -84,6 +87,7 @@ const _vAxisZ = new THREE.Vector3();
 const _vBestNormal = new THREE.Vector3();
 const _vCandNormal = new THREE.Vector3();
 const _qTmp = new THREE.Quaternion();
+const _eTmp = new THREE.Euler(0, 0, 0, 'YXZ');
 const _mSplash = new THREE.Matrix4();
 const _vSplashScale = new THREE.Vector3();
 const _qIdentity = new THREE.Quaternion();
@@ -440,11 +444,22 @@ export class PoolGameEngine {
   }> = [];
   private waterMesh: THREE.Mesh | null = null;
   private waterMat: THREE.MeshStandardMaterial | null = null;
+  private waterOrigNormalMap: THREE.Texture | null = null;
+  private uWaterQuality = { value: 1.0 };
   private uCausticTime = { value: 0 };
   private uCausticEnabled = { value: 1.0 };
   private baseCausticEnabled = 1.0;
   private uCausticRangeSq = { value: 55 * 55 };
   private uMistTime = { value: 0 };
+  private levelQualityMaterials: Array<{
+    mat: THREE.MeshStandardMaterial;
+    origBumpMap: THREE.Texture | null;
+    origRoughnessMap: THREE.Texture | null;
+    origEnvIntensity: number;
+  }> = [];
+  private levelShadowReceivers: THREE.Mesh[] = [];
+  private _prewarmScissor = new THREE.Vector4();
+  private _prewarmViewport = new THREE.Vector4();
   private baseFogColor = new THREE.Color('#091318');
   private underwaterFogColor = new THREE.Color('#03090c');
   private baseFogDensity = 0.022;
@@ -506,6 +521,7 @@ export class PoolGameEngine {
   private camYaw = 0; // 0 looks toward -Z
   private camPitch = 0.24;
   private camDist = 5.0;
+  private lastCamThirdPerson = true;
   private camShake = 0;
   private pendingLookDx = 0;
   private pendingLookDy = 0;
@@ -635,11 +651,12 @@ export class PoolGameEngine {
     initialCharacter: CharacterId = 'male'
   ) {
     this.container = container;
+    const cleanSettings = sanitizeGameSettings(settings);
     this.localCharacterId = normalizeCharacterId(initialCharacter);
-    this.settings = { ...settings, quality: normalizeQualityPreset(settings.quality) };
+    this.settings = cleanSettings;
     this.callbacks = callbacks;
     this.sound = new SoundEngine();
-    this.sound.setVolumes(settings.masterVolume, settings.musicVolume, settings.sfxVolume, settings.muted);
+    this.sound.setVolumes(cleanSettings.masterVolume, cleanSettings.musicVolume, cleanSettings.sfxVolume, cleanSettings.muted);
 
     const gpuProbe = probeGraphicsCapabilities();
     this.isSoftwareGl = gpuProbe.isSoftwareGl;
@@ -844,9 +861,44 @@ export class PoolGameEngine {
     }
   }
 
+  private isThirdPersonView(): boolean {
+    return this.settings ? Boolean(this.settings.invertY) : true;
+  }
+
+  private isLocalFirstPersonActive(): boolean {
+    const spectating = this.isMultiplayer && (!this.mpLocalAlive || this.mpLocalEscaped);
+    return (
+      !this.isThirdPersonView() &&
+      !spectating &&
+      (this.phase === 'playing' || this.phase === 'paused') &&
+      !this.mpLocalBeingEaten
+    );
+  }
+
+  private syncFirstPersonHeadlamp(): void {
+    if (!this.isLocalFirstPersonActive()) return;
+    const yaw = Number.isFinite(this.camYaw) ? this.camYaw : 0;
+    const pitch = Number.isFinite(this.camPitch) ? this.camPitch : 0.25;
+    const bodyYaw = Number.isFinite(this.playerYaw) ? this.playerYaw : Math.PI;
+    const eyeOffset = this.inWater ? 1.52 : 1.58;
+    this.playerRig.lampAnchor.position.set(0, eyeOffset, 0);
+    _eTmp.set(pitch, yaw + Math.PI - bodyYaw, 0, 'YXZ');
+    this.playerRig.lampAnchor.quaternion.setFromEuler(_eTmp);
+    this.playerRig.lampAnchor.updateMatrixWorld(true);
+  }
+
+  private restoreLocalPlayerMeshes(): void {
+    this.playerRig.root.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        obj.visible = true;
+        obj.frustumCulled = false;
+      }
+    });
+  }
+
   private ensureLocalPlayerVisible(): void {
     const shouldBeVisible =
-      this.phase === 'playing' &&
+      (this.phase === 'playing' || this.phase === 'paused') &&
       !this.mpLocalBeingEaten &&
       (!this.isMultiplayer || (this.mpLocalAlive && !this.mpLocalEscaped));
     if (!shouldBeVisible) return;
@@ -883,12 +935,16 @@ export class PoolGameEngine {
     }
     this.playerRig.root.scale.setScalar(1);
     this.playerRig.setVisible(true);
+    const hideLocalMeshes = this.isLocalFirstPersonActive();
     this.playerRig.root.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh) {
-        obj.visible = true;
+        obj.visible = !hideLocalMeshes;
         obj.frustumCulled = false;
       }
     });
+    if (hideLocalMeshes) {
+      this.syncFirstPersonHeadlamp();
+    }
   }
 
   private detectInitialQuality(): ActiveQualityTier {
@@ -925,6 +981,19 @@ export class PoolGameEngine {
       this.menuFrameAccum = 0;
       this.ensureLoopRunning();
     }
+  }
+
+  private registerLevelMaterial(mat: THREE.MeshStandardMaterial): void {
+    this.levelQualityMaterials.push({
+      mat,
+      origBumpMap: mat.bumpMap ?? null,
+      origRoughnessMap: mat.roughnessMap ?? null,
+      origEnvIntensity: mat.envMapIntensity,
+    });
+  }
+
+  private registerShadowReceiver(mesh: THREE.Mesh): void {
+    this.levelShadowReceivers.push(mesh);
   }
 
   private applyQualityToRenderer(): void {
@@ -982,8 +1051,10 @@ export class PoolGameEngine {
       shadowEnabled = false;
       this.activeRenderDist = 88;
       this.uCausticEnabled.value = 0;
+      aniso = 1;
     }
     this.baseCausticEnabled = this.uCausticEnabled.value;
+    this.uWaterQuality.value = q === 'ultra' ? 2.0 : q === 'standard' ? 1.0 : 0.0;
     this._lastLightCamX = NaN;
     this._lastCullCamZ = NaN;
     this.needsStaticRender = true;
@@ -998,7 +1069,10 @@ export class PoolGameEngine {
     }
     if (this._appliedShadowEnabled !== shadowEnabled) {
       this.renderer.shadowMap.enabled = shadowEnabled;
+      this.renderer.shadowMap.autoUpdate = shadowEnabled;
       this._appliedShadowEnabled = shadowEnabled;
+    } else {
+      this.renderer.shadowMap.autoUpdate = shadowEnabled;
     }
     if (shadowEnabled && this._appliedShadowType !== shadowType) {
       this.renderer.shadowMap.type = shadowType;
@@ -1024,9 +1098,11 @@ export class PoolGameEngine {
       }
     }
     if (this.textures) {
-      if (this._appliedAniso !== aniso) {
-        this.textures.setAnisotropy(aniso);
-        this._appliedAniso = aniso;
+      const clampedAniso = Math.min(aniso, Math.max(1, this.renderer.capabilities.getMaxAnisotropy()));
+      if (this._appliedAniso !== clampedAniso) {
+        this.textures.setAnisotropy(clampedAniso);
+        setCharacterTextureAnisotropy(this.textures, clampedAniso);
+        this._appliedAniso = clampedAniso;
       }
       if (this._appliedQualityTier !== q) {
         setEntityQualityTier(this.textures, q);
@@ -1042,8 +1118,34 @@ export class PoolGameEngine {
     for (const m of this.monsters) {
       m.rig.setShadowDetail(q);
     }
+    const enableBump = q !== 'smooth' && !this.isSoftwareGl;
+    const enableRough = (q === 'ultra' || (q === 'standard' && !this.isTouchDevice && !this.isLowEndGpu)) && !this.isSoftwareGl;
+    const envScale = q === 'ultra' ? 1.12 : q === 'standard' ? 1.0 : 0.72;
+    for (let i = 0; i < this.levelQualityMaterials.length; i++) {
+      const entry = this.levelQualityMaterials[i];
+      const nextBump = enableBump ? entry.origBumpMap : null;
+      const nextRough = enableRough ? entry.origRoughnessMap : null;
+      if (entry.mat.bumpMap !== nextBump || entry.mat.roughnessMap !== nextRough) {
+        entry.mat.bumpMap = nextBump;
+        entry.mat.roughnessMap = nextRough;
+        entry.mat.needsUpdate = true;
+      }
+      entry.mat.envMapIntensity = entry.origEnvIntensity * envScale;
+    }
+    for (let i = 0; i < this.levelShadowReceivers.length; i++) {
+      this.levelShadowReceivers[i].receiveShadow = shadowEnabled;
+    }
     if (this.waterMat) {
+      const nextWaterNormal = enableBump ? this.waterOrigNormalMap : null;
+      if (this.waterMat.normalMap !== nextWaterNormal) {
+        this.waterMat.normalMap = nextWaterNormal;
+        this.waterMat.needsUpdate = true;
+      }
+      this.waterMat.roughness = q === 'ultra' ? 0.04 : q === 'standard' ? 0.09 : 0.16;
       this.waterMat.envMapIntensity = waterEnv;
+      if ('clearcoat' in this.waterMat) {
+        (this.waterMat as THREE.MeshPhysicalMaterial).clearcoat = q === 'ultra' ? 1.0 : 0.0;
+      }
     }
     if (this.waterMesh) {
       this.waterMesh.receiveShadow = shadowEnabled && !this.isTouchDevice && q !== 'smooth';
@@ -1089,20 +1191,49 @@ export class PoolGameEngine {
   }
 
   public updateSettings(next: GameSettings): void {
-    const normalizedQuality = normalizeQualityPreset(next.quality);
-    this.settings = { ...next, quality: normalizedQuality };
-    this.sound.setVolumes(next.masterVolume, next.musicVolume, next.sfxVolume, next.muted);
+    const sanitized = sanitizeGameSettings(next);
+    const prevPreset = this.settings.quality;
+    const prevInvertY = this.settings.invertY;
+    this.settings = sanitized;
+    this.sound.setVolumes(sanitized.masterVolume, sanitized.musicVolume, sanitized.sfxVolume, sanitized.muted);
     if (!this.isSoftwareGl) {
-      const target = normalizedQuality === 'auto' ? this.detectInitialQuality() : normalizedQuality;
+      const target = sanitized.quality === 'auto' ? this.detectInitialQuality() : sanitized.quality;
+      const wasScaled = Math.abs(this.dynamicResScale - 1.0) > 1e-4;
       this.dynamicResScale = 1.0;
       this.autoDowngradeCount = 0;
-      if (target !== this.activeQuality) {
+      this.slowFrameCount = 0;
+      this.highFpsStreak = 0;
+      this.qualityCooldownTimer = 0;
+      if (target !== this.activeQuality || sanitized.quality !== prevPreset || wasScaled) {
         this.activeQuality = target;
         this.applyQualityToRenderer();
         if (target !== 'smooth' && !this.horrorComposerWarmed) {
           this.prewarmSceneShaders();
         }
         this.emitHud(true);
+      }
+    }
+    if (sanitized.invertY !== prevInvertY) {
+      if (sanitized.invertY) {
+        this.camDist = this.inWater || this.waterJumpTimer > 0 ? 4.4 : 5.0;
+      }
+      this.ensureLocalPlayerVisible();
+      if (this.phase === 'playing' || this.phase === 'paused') {
+        if (sanitized.invertY) {
+          this.syncLocalPlayerRigTransform(this.mpLastAnimState, this.mpLastHorizSpeed);
+        }
+        this.snapPlayCameraImmediate();
+        if (this.phase === 'paused' && !this.disposed && !this.contextLost) {
+          this.updateVisibilityCulling(true);
+          const gl = this.renderer.getContext?.() as WebGL2RenderingContext | null;
+          if (!gl || !gl.isContextLost?.()) {
+            try {
+              this.renderer.render(this.scene, this.camera);
+            } catch {
+              // ignore if renderer context is unavailable in headless harnesses
+            }
+          }
+        }
       }
     }
     this.needsStaticRender = true;
@@ -1166,13 +1297,12 @@ export class PoolGameEngine {
     if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
     if (dx === 0 && dy === 0) return;
     const sens = 0.0042 * this.settings.mouseSensitivity;
-    const ySign = this.settings.invertY ? -1 : 1;
     let nextYaw = this.camYaw - dx * sens;
     if (nextYaw > Math.PI || nextYaw < -Math.PI) {
       nextYaw = Math.atan2(Math.sin(nextYaw), Math.cos(nextYaw));
     }
     this.camYaw = nextYaw;
-    this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * sens * ySign, -0.55, 1.18);
+    this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * sens, -0.55, 1.18);
   }
 
   private flushPendingLookInput(): void {
@@ -1811,6 +1941,7 @@ export class PoolGameEngine {
       this.mpLocalBeingEaten = true;
       this.playerRig.root.scale.setScalar(1);
       this.playerRig.setVisible(true);
+      this.restoreLocalPlayerMeshes();
       this.heldKeys.clear();
       this.virtualMove.x = 0;
       this.virtualMove.y = 0;
@@ -2364,6 +2495,9 @@ export class PoolGameEngine {
     _pickedLights.length = 0;
     this.waterMesh = null;
     this.waterMat = null;
+    this.waterOrigNormalMap = null;
+    this.levelQualityMaterials = [];
+    this.levelShadowReceivers = [];
     this.exitGroup = null;
     this.mistMesh = null;
     this.coneMesh = null;
@@ -2438,11 +2572,11 @@ export class PoolGameEngine {
     keyLight.target.position.set(def.spawn[0], 0, def.spawn[2]);
     const wantShadow = !this.isSoftwareGl && this.activeQuality !== 'smooth';
     keyLight.castShadow = wantShadow;
-    const sMap = this.activeQuality === 'ultra' ? (this.isTouchDevice ? 1024 : 2048) : 1024;
+    const sMap = this.activeQuality === 'ultra' ? (this.isTouchDevice ? 1024 : 2048) : this.isTouchDevice ? 768 : 1024;
     keyLight.shadow.mapSize.set(sMap, sMap);
     keyLight.shadow.camera.near = 2;
     keyLight.shadow.camera.far = 135;
-    const d = this.activeQuality === 'ultra' ? 52 : 38;
+    const d = this.activeQuality === 'ultra' ? 52 : this.isTouchDevice ? 32 : 38;
     keyLight.shadow.camera.left = -d;
     keyLight.shadow.camera.right = d;
     keyLight.shadow.camera.top = d;
@@ -2789,8 +2923,8 @@ export class PoolGameEngine {
 
     const prevScissorTest = this.renderer.getScissorTest();
     const prevAutoClear = this.renderer.autoClear;
-    const prevScissor = new THREE.Vector4();
-    const prevViewport = new THREE.Vector4();
+    const prevScissor = this._prewarmScissor;
+    const prevViewport = this._prewarmViewport;
     this.renderer.getScissor(prevScissor);
     this.renderer.getViewport(prevViewport);
 
@@ -3111,12 +3245,14 @@ export class PoolGameEngine {
       metalness: 0.08,
     });
     this.injectUnderwaterCaustics(floorMat, waterY, true);
+    this.registerLevelMaterial(floorMat);
     const floorGeo = new THREE.PlaneGeometry(width, depth);
     this.scalePlaneUVs(floorGeo, width / 3.2, depth / 3.2);
     const floorMesh = new THREE.Mesh(floorGeo, floorMat);
     floorMesh.rotation.x = -Math.PI / 2;
     floorMesh.position.set(cx, floorY, cz);
     floorMesh.receiveShadow = true;
+    this.registerShadowReceiver(floorMesh);
     this.levelGroup.add(floorMesh);
     this.levelDisposables.push(floorMat, floorGeo);
 
@@ -3145,6 +3281,7 @@ export class PoolGameEngine {
       metalness: 0.06,
     });
     this.injectUnderwaterCaustics(wallMat, waterY, false);
+    this.registerLevelMaterial(wallMat);
     this.levelDisposables.push(wallMat);
 
     const wallLRGeo = new THREE.PlaneGeometry(depth, height);
@@ -3153,12 +3290,14 @@ export class PoolGameEngine {
     leftWall.rotation.y = Math.PI / 2;
     leftWall.position.set(minX, floorY + height * 0.5, cz);
     leftWall.receiveShadow = true;
+    this.registerShadowReceiver(leftWall);
     this.levelGroup.add(leftWall);
 
     const rightWall = new THREE.Mesh(wallLRGeo, wallMat);
     rightWall.rotation.y = -Math.PI / 2;
     rightWall.position.set(maxX, floorY + height * 0.5, cz);
     rightWall.receiveShadow = true;
+    this.registerShadowReceiver(rightWall);
     this.levelGroup.add(rightWall);
 
     const wallFBGeo = new THREE.PlaneGeometry(width, height);
@@ -3166,12 +3305,14 @@ export class PoolGameEngine {
     const backWall = new THREE.Mesh(wallFBGeo, wallMat);
     backWall.position.set(cx, floorY + height * 0.5, minZ);
     backWall.receiveShadow = true;
+    this.registerShadowReceiver(backWall);
     this.levelGroup.add(backWall);
 
     const frontWall = new THREE.Mesh(wallFBGeo, wallMat);
     frontWall.rotation.y = Math.PI;
     frontWall.position.set(cx, floorY + height * 0.5, maxZ);
     frontWall.receiveShadow = true;
+    this.registerShadowReceiver(frontWall);
     this.levelGroup.add(frontWall);
     this.levelDisposables.push(wallLRGeo, wallFBGeo);
 
@@ -3190,6 +3331,7 @@ export class PoolGameEngine {
         roughness: 0.84,
         metalness: 0.1,
       });
+      this.registerLevelMaterial(beamMat);
       const beamInst = new THREE.InstancedMesh(beamGeo, beamMat, ribZs.length);
       const dummy = new THREE.Object3D();
       ribZs.forEach((z, idx) => {
@@ -3228,6 +3370,7 @@ export class PoolGameEngine {
         roughness: 0.38,
         metalness: 0.82,
       });
+      this.registerLevelMaterial(steelMat);
       for (const sideX of [minX + 0.14, maxX - 0.14]) {
         const g = new THREE.Mesh(gutterGeo, steelMat);
         g.position.set(sideX, waterY + 0.22, cz);
@@ -3395,6 +3538,8 @@ export class PoolGameEngine {
       roughness: 0.9,
       metalness: 0.08,
     });
+    this.registerLevelMaterial(rustMat);
+    this.registerLevelMaterial(rubbleMat);
     this.levelDisposables.push(rustMat, rubbleMat);
 
     // 1. Broken Ceiling Skylights + Volumetric Angled Moonlight Shafts along corridor centerline
@@ -3726,12 +3871,13 @@ export class PoolGameEngine {
     const cz = (minZ + maxZ) * 0.5;
 
     const lowWater = this.isSoftwareGl || this.isLowEndGpu || this.activeQuality === 'smooth';
-    const segX = lowWater ? 14 : this.isTouchDevice ? 22 : 34;
-    const segZ = lowWater ? 28 : this.isTouchDevice ? 44 : 68;
+    const segX = lowWater ? 14 : this.isTouchDevice ? 18 : 28;
+    const segZ = lowWater ? 28 : this.isTouchDevice ? 36 : 56;
     const geo = new THREE.PlaneGeometry(width, depth, segX, segZ);
 
     this.textures.waterNormal.repeat.set(Math.max(5, width / 8.5), Math.max(10, depth / 8.5));
     this.textures.waterNormal.needsUpdate = true;
+    this.waterOrigNormalMap = this.textures.waterNormal;
 
     const useLightWaterMat = lowWater || this.isTouchDevice || this.activeQuality !== 'ultra';
     const mat: THREE.MeshStandardMaterial = useLightWaterMat
@@ -3760,40 +3906,46 @@ export class PoolGameEngine {
           opacity: 0.80,
         });
 
-    // Multi-octave swells + real-time serpent V-wake water displacement & churning whitewater foam
-    mat.customProgramCacheKey = () => 'water_surface_aaa_v2';
+    // Multi-octave swells + real-time serpent V-wake water displacement & churning whitewater foam (quality-scaled)
+    mat.customProgramCacheKey = () => 'water_surface_aaa_v3';
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = { value: 0 };
       shader.uniforms.uSerpentHead = { value: new THREE.Vector2(0, -999) };
       shader.uniforms.uSerpentDir = { value: new THREE.Vector2(0, 1) };
       shader.uniforms.uSerpentWake = { value: 0 };
+      shader.uniforms.uWaterQuality = this.uWaterQuality;
       mat.userData.shader = shader;
       shader.vertexShader =
-        'uniform float uTime;\nuniform vec2 uSerpentHead;\nuniform vec2 uSerpentDir;\nuniform float uSerpentWake;\nvarying float vWaveHeight;\nvarying float vSerpentFoam;\n' +
+        'uniform float uTime;\nuniform vec2 uSerpentHead;\nuniform vec2 uSerpentDir;\nuniform float uSerpentWake;\nuniform float uWaterQuality;\nvarying float vWaveHeight;\nvarying float vSerpentFoam;\n' +
         shader.vertexShader.replace(
           '#include <begin_vertex>',
           `
           #include <begin_vertex>
           float w1 = sin(position.x * 0.48 + uTime * 1.65) * cos(position.y * 0.42 - uTime * 1.25) * 0.014;
-          float w2 = sin((position.x * 0.82 - position.y * 0.95) + uTime * 2.15) * 0.008;
-          float w3 = cos((position.x * 1.4 + position.y * 1.1) - uTime * 2.8) * 0.004;
-          float wh = w1 + w2 + w3 + 0.026;
+          float wh = w1 + 0.026;
+          if (uWaterQuality > 0.5) {
+            float w2 = sin((position.x * 0.82 - position.y * 0.95) + uTime * 2.15) * 0.008;
+            float w3 = cos((position.x * 1.4 + position.y * 1.1) - uTime * 2.8) * 0.004;
+            wh += w2 + w3;
+          }
 
-          vec2 worldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;
-          vec2 rel = worldXZ - uSerpentHead;
-          float along = dot(rel, uSerpentDir);
-          float across = dot(rel, vec2(-uSerpentDir.y, uSerpentDir.x));
           float wakeDisp = 0.0;
           float foamMask = 0.0;
-          if (uSerpentWake > 0.01 && along < 3.5 && along > -24.0) {
-            float trailT = clamp(-along / 22.0, 0.0, 1.0);
-            float vWidth = 1.0 + trailT * 4.4;
-            float vEdge = abs(abs(across) - vWidth * 0.72);
-            float bowCrest = exp(-(vEdge * vEdge) / 0.85) * exp(-trailT * 1.65);
-            float coreTrough = exp(-(across * across) / (0.8 + trailT * 1.2)) * exp(-trailT * 1.4);
-            float thrash = sin(along * 1.5 - uTime * 26.0) * 0.5 + 0.5;
-            wakeDisp = (bowCrest * 0.24 - coreTrough * 0.14 + bowCrest * thrash * 0.12) * uSerpentWake;
-            foamMask = clamp((bowCrest * 0.85 + coreTrough * (0.55 + thrash * 0.45)) * uSerpentWake, 0.0, 1.0);
+          if (uSerpentWake > 0.01) {
+            vec2 worldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;
+            vec2 rel = worldXZ - uSerpentHead;
+            float along = dot(rel, uSerpentDir);
+            if (along < 3.5 && along > -24.0) {
+              float across = dot(rel, vec2(-uSerpentDir.y, uSerpentDir.x));
+              float trailT = clamp(-along / 22.0, 0.0, 1.0);
+              float vWidth = 1.0 + trailT * 4.4;
+              float vEdge = abs(abs(across) - vWidth * 0.72);
+              float bowCrest = exp(-(vEdge * vEdge) / 0.85) * exp(-trailT * 1.65);
+              float coreTrough = exp(-(across * across) / (0.8 + trailT * 1.2)) * exp(-trailT * 1.4);
+              float thrash = uWaterQuality > 0.5 ? (sin(along * 1.5 - uTime * 26.0) * 0.5 + 0.5) : 0.5;
+              wakeDisp = (bowCrest * 0.24 - coreTrough * 0.14 + bowCrest * thrash * 0.12) * uSerpentWake;
+              foamMask = clamp((bowCrest * 0.85 + coreTrough * (0.55 + thrash * 0.45)) * uSerpentWake, 0.0, 1.0);
+            }
           }
 
           transformed.z += wh + wakeDisp;
@@ -3803,12 +3955,14 @@ export class PoolGameEngine {
         );
 
       shader.fragmentShader =
-        'varying float vWaveHeight;\nvarying float vSerpentFoam;\n' +
+        'uniform float uWaterQuality;\nvarying float vWaveHeight;\nvarying float vSerpentFoam;\n' +
         shader.fragmentShader.replace(
           '#include <emissivemap_fragment>',
           `
           #include <emissivemap_fragment>
-          float fresnel = pow(1.0 - clamp(abs(dot(normalize(normal), normalize(vViewPosition))), 0.0, 1.0), 3.0);
+          float fresnel = uWaterQuality > 0.5
+            ? pow(1.0 - clamp(abs(dot(normalize(normal), normalize(vViewPosition))), 0.0, 1.0), 3.0)
+            : 0.18;
           float crest = smoothstep(0.032, 0.09, vWaveHeight);
           totalEmissiveRadiance += vec3(0.035, 0.085, 0.115) * fresnel * 0.6 + vec3(0.09, 0.15, 0.17) * vSerpentFoam * 0.42;
           diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.36, 0.46, 0.50), clamp(crest * 0.22 + fresnel * 0.14 + vSerpentFoam * 0.72, 0.0, 0.88));
@@ -3891,6 +4045,7 @@ export class PoolGameEngine {
             const mesh = new THREE.Mesh(merged, mat);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
+            this.registerShadowReceiver(mesh);
             this.levelGroup.add(mesh);
             this.levelDisposables.push(merged);
             this.staticChunks.push({ mesh, minZ: cMinZ, maxZ: cMaxZ, castShadow: true });
@@ -3908,6 +4063,7 @@ export class PoolGameEngine {
             const mesh = new THREE.Mesh(merged, mat);
             mesh.castShadow = false;
             mesh.receiveShadow = true;
+            this.registerShadowReceiver(mesh);
             this.levelGroup.add(mesh);
             this.levelDisposables.push(merged);
             this.staticChunks.push({ mesh, minZ: cMinZ, maxZ: cMaxZ, castShadow: false });
@@ -4026,6 +4182,11 @@ export class PoolGameEngine {
       roughness: 0.58,
       metalness: 0.72,
     });
+    this.registerLevelMaterial(subFrameMat);
+    this.registerLevelMaterial(curbSteelMat);
+    this.registerLevelMaterial(woodWetMat);
+    this.registerLevelMaterial(woodTrimMat);
+    this.registerLevelMaterial(woodIronMat);
     this.levelDisposables.push(subFrameMat, curbSteelMat, woodWetMat, woodTrimMat, woodIronMat);
 
     // One shared material per static platform finish (UV tiling baked onto BoxGeometry per surface)
@@ -4043,6 +4204,7 @@ export class PoolGameEngine {
           metalness,
         });
         accentMatMap.set(texKey, cached);
+        this.registerLevelMaterial(cached);
         this.levelDisposables.push(cached);
       }
       return cached;
@@ -4117,6 +4279,7 @@ export class PoolGameEngine {
           transparent: false,
           opacity: 1,
         });
+        this.registerLevelMaterial(mat);
         this.levelDisposables.push(mat);
       } else {
         mat = getAccentMaterial(texKey, isWood, color, roughness, metalness, baseTex, bumpBase, roughBase);
@@ -4272,6 +4435,7 @@ export class PoolGameEngine {
         topMesh.position.y = h * 0.5 - topH * 0.5;
         topMesh.castShadow = true;
         topMesh.receiveShadow = true;
+        this.registerShadowReceiver(topMesh);
         group.add(topMesh);
         this.levelDisposables.push(topGeo);
 
@@ -4318,6 +4482,7 @@ export class PoolGameEngine {
         topMesh.position.y = h * 0.5 - topH * 0.5;
         topMesh.castShadow = true;
         topMesh.receiveShadow = true;
+        this.registerShadowReceiver(topMesh);
         group.add(topMesh);
         this.levelDisposables.push(topGeo);
 
@@ -4358,6 +4523,7 @@ export class PoolGameEngine {
           if (arr.length > 1) arr.forEach((g) => g.dispose());
           const subMesh = new THREE.Mesh(merged, m);
           subMesh.receiveShadow = true;
+          this.registerShadowReceiver(subMesh);
           group.add(subMesh);
           this.levelDisposables.push(merged);
         }
@@ -4434,6 +4600,9 @@ export class PoolGameEngine {
     });
     this.injectUnderwaterCaustics(pillarMat, def.bounds.waterY, false);
     this.injectUnderwaterCaustics(wallTileMat, def.bounds.waterY, false);
+    this.registerLevelMaterial(collarMat);
+    this.registerLevelMaterial(pillarMat);
+    this.registerLevelMaterial(wallTileMat);
     this.levelDisposables.push(collarMat, pillarMat, wallTileMat);
 
     const minZ = def.bounds.minZ;
@@ -4957,7 +5126,7 @@ export class PoolGameEngine {
       this.scene.background.lerp(targetColor, kFog);
     }
 
-    // Follow player (or devouring serpent) with shadow-casting moonlight DirectionalLight (snapped to texel grid)
+    // Follow player (or devouring serpent) with shadow-casting moonlight DirectionalLight (snapped cleanly to exact shadow texel grid)
     if (this.keyLight) {
       const focusX =
         this.phase === 'jumpscare' && this.jumpscareMonster
@@ -4967,8 +5136,11 @@ export class PoolGameEngine {
         this.phase === 'jumpscare' && this.jumpscareMonster
           ? this.jumpscareMonster.pos.z
           : this.playerPos.z;
-      const snapX = Math.round(focusX * 2) * 0.5;
-      const snapZ = Math.round(focusZ * 2) * 0.5;
+      const d = Math.max(1, this.keyLight.shadow.camera.right);
+      const sMap = Math.max(1, this.keyLight.shadow.mapSize.width);
+      const texelSize = (d * 2) / sMap;
+      const snapX = Math.round(focusX / texelSize) * texelSize;
+      const snapZ = Math.round(focusZ / texelSize) * texelSize;
       this.keyLight.position.set(snapX + 18, 34, snapZ + 14);
       this.keyLight.target.position.set(snapX, 0, snapZ);
     }
@@ -6125,7 +6297,8 @@ export class PoolGameEngine {
       eatU,
       null,
       b.floorY,
-      true
+      true,
+      b.ceilingY
     );
 
     // Serpent is stationary horizontally while devouring; run spine obstacle push on initial frames & every 3rd frame
@@ -6260,7 +6433,8 @@ export class PoolGameEngine {
           dt,
           m.eatingPreyStartPos,
           m.eatingPreyStartYaw,
-          true
+          true,
+          b.ceilingY
         );
       }
     } else if (m.eatingUserId) {
@@ -6268,7 +6442,7 @@ export class PoolGameEngine {
       if (rp) {
         if (eatU < 0.995) {
           rp.rig.root.visible = true;
-          rp.nameplate.visible = eatU < 0.52;
+          rp.nameplate.visible = eatU < 0.56;
           attachPreyToSerpentMouth(
             m.rig,
             rp.rig,
@@ -6277,7 +6451,8 @@ export class PoolGameEngine {
             dt,
             m.eatingPreyStartPos,
             m.eatingPreyStartYaw,
-            true
+            true,
+            b.ceilingY
           );
         } else {
           rp.rig.root.visible = false;
@@ -7551,8 +7726,9 @@ export class PoolGameEngine {
 
   private computePlayCameraGoals(outTarget: THREE.Vector3, outCamPos: THREE.Vector3, dt?: number): void {
     // Target local player or spectate first alive teammate if caught in multiplayer
+    const spectating = this.isMultiplayer && (!this.mpLocalAlive || this.mpLocalEscaped);
     let focusPos = this.playerPos;
-    if (this.isMultiplayer && (!this.mpLocalAlive || this.mpLocalEscaped)) {
+    if (spectating) {
       for (const rp of this.remotePlayers.values()) {
         if (rp.alive && !rp.escaped) {
           focusPos = rp.pos;
@@ -7565,14 +7741,32 @@ export class PoolGameEngine {
     }
     if (!Number.isFinite(this.camYaw)) this.camYaw = 0;
     if (!Number.isFinite(this.camPitch)) this.camPitch = 0.25;
-    outTarget.set(focusPos.x, focusPos.y + 1.48, focusPos.z);
 
-    // Keep radial distance stable across brief water-jump arcs instead of jerking 4.4 <-> 5.0 mid-air
-    const desiredDist = this.inWater || this.waterJumpTimer > 0 ? 4.4 : 5.0;
     const cosPitch = Math.cos(this.camPitch);
     const dirX = Math.sin(this.camYaw) * cosPitch;
     const dirY = Math.sin(this.camPitch);
     const dirZ = Math.cos(this.camYaw) * cosPitch;
+
+    const useThirdPerson = this.isThirdPersonView() || spectating;
+    if (!useThirdPerson) {
+      const b = this.currentLevel.bounds;
+      const eyeOffset = this.inWater ? 1.52 : 1.58;
+      const eyeX = THREE.MathUtils.clamp(focusPos.x, b.minX + 0.35, b.maxX - 0.35);
+      const eyeY = THREE.MathUtils.clamp(focusPos.y + eyeOffset, b.floorY + 0.35, b.ceilingY - 0.35);
+      const eyeZ = THREE.MathUtils.clamp(focusPos.z, b.minZ + 0.35, b.maxZ - 0.35);
+
+      outCamPos.set(eyeX, eyeY, eyeZ);
+      outTarget.set(eyeX - dirX * 4.0, eyeY - dirY * 4.0, eyeZ - dirZ * 4.0);
+      this.lastCamThirdPerson = false;
+      return;
+    }
+
+    const switchedFromFirstPerson = !this.lastCamThirdPerson;
+    this.lastCamThirdPerson = true;
+    outTarget.set(focusPos.x, focusPos.y + 1.48, focusPos.z);
+
+    // Keep radial distance stable across brief water-jump arcs instead of jerking 4.4 <-> 5.0 mid-air
+    const desiredDist = this.inWater || this.waterJumpTimer > 0 ? 4.4 : 5.0;
 
     const idealX = outTarget.x + dirX * desiredDist;
     const idealY = outTarget.y + dirY * desiredDist;
@@ -7594,7 +7788,7 @@ export class PoolGameEngine {
     // Keep horizontal/vertical rotation and player follow 100% instant (zero lag);
     // only ease radial wall-occlusion recovery rapidly along the exact current look ray.
     let useDist = occludedDist;
-    if (dt !== undefined && dt > 0 && Number.isFinite(this.camDist)) {
+    if (!switchedFromFirstPerson && dt !== undefined && dt > 0 && Number.isFinite(this.camDist)) {
       if (occludedDist <= this.camDist || Math.abs(occludedDist - this.camDist) < 0.015) {
         this.camDist = occludedDist;
       } else {
@@ -7670,6 +7864,7 @@ export class PoolGameEngine {
     this.camera.position.copy(_vCamPos);
     this.camera.lookAt(_vCamTarget);
     this.camera.updateMatrixWorld();
+    this.syncFirstPersonHeadlamp();
     this.updateVisibilityCulling();
   }
 
@@ -7687,6 +7882,7 @@ export class PoolGameEngine {
 
     this.camera.lookAt(_vCamTarget);
     this.camera.updateMatrixWorld();
+    this.syncFirstPersonHeadlamp();
   }
 
   private checkExit(): void {
@@ -7901,18 +8097,24 @@ export class PoolGameEngine {
       m.rig.headGroup.getWorldPosition(_vEatHeadPos);
     }
 
-    // Frame slightly ahead of head center so both the jaws and swallowed diver stay centered cleanly
-    const forwardBias = (0.42 - eatU * 0.15) * m.scale;
+    const air = computeSerpentDevourAirborneLift(eatU, m.scale, waterY, b.ceilingY);
+    const airSin = air.active ? Math.sin(air.tAir * Math.PI) : 0;
+
+    // Frame slightly ahead of head center and pan smoothly up during airborne toss so both serpent & airborne diver fit cleanly
+    const forwardBias = (0.45 - eatU * 0.16) * m.scale + air.forwardOffset * 0.34;
     const headWorld = _vCamTarget.set(
-      _vEatHeadPos.x + Math.sin(m.yaw) * forwardBias,
-      _vEatHeadPos.y - 0.08 * m.scale,
-      _vEatHeadPos.z + Math.cos(m.yaw) * forwardBias
+      _vEatHeadPos.x + Math.sin(m.yaw) * forwardBias + Math.cos(m.yaw) * air.lateralOffset * 0.3,
+      _vEatHeadPos.y - 0.06 * m.scale + air.verticalOffset * 0.44,
+      _vEatHeadPos.z + Math.cos(m.yaw) * forwardBias - Math.sin(m.yaw) * air.lateralOffset * 0.3
     );
 
-    // 3/4 side-front cinematic framing sweeping closer as jaws clamp & swallow
-    const orbitAngle = m.yaw + this.eatingCamSide * THREE.MathUtils.lerp(0.95, 0.68, THREE.MathUtils.smoothstep(eatU, 0.15, 0.85));
-    const camDist = THREE.MathUtils.lerp(5.25, 4.3, THREE.MathUtils.smoothstep(eatU, 0.08, 0.82)) * m.scale;
-    const camY = waterY + THREE.MathUtils.lerp(2.2, 2.7, THREE.MathUtils.smoothstep(eatU, 0.14, 0.72)) * m.scale;
+    // 3/4 side-front cinematic framing pulling slightly wider for airborne arc, then sweeping close for bite & swallow
+    const orbitAngle = m.yaw + this.eatingCamSide * THREE.MathUtils.lerp(0.98, 0.68, THREE.MathUtils.smoothstep(eatU, 0.25, 0.88));
+    const camDist =
+      (THREE.MathUtils.lerp(5.2, 4.15, THREE.MathUtils.smoothstep(eatU, 0.44, 0.90)) + airSin * 1.45) *
+      m.scale;
+    const baseCamY = waterY + THREE.MathUtils.lerp(2.1, 2.65, THREE.MathUtils.smoothstep(eatU, 0.44, 0.80)) * m.scale;
+    const camY = baseCamY - airSin * 0.25 * m.scale;
 
     const camSpot = _vCamPos.set(
       headWorld.x + Math.sin(orbitAngle) * camDist,
@@ -7946,15 +8148,15 @@ export class PoolGameEngine {
       );
     }
 
-    const blendK = dt > 0 ? 1 - Math.exp(-9.5 * dt) : 0.35;
+    const blendK = dt > 0 ? 1 - Math.exp(-10.5 * dt) : 0.35;
     this.camera.position.lerp(camSpot, blendK);
 
-    // Realistic cinematic impact camera shake, struggle tremor, and swallow convulsion jolts
-    const impactShake = Math.exp(-eatU * 9.5) * 0.24;
-    const thrashShake = eatU > 0.14 && eatU < 0.48 ? Math.sin(eatU * 42) * 0.032 : 0;
-    const gulp1Jolt = Math.sin(THREE.MathUtils.clamp((eatU - 0.38) / 0.2, 0, 1) * Math.PI) * 0.075;
-    const gulp2Jolt = Math.sin(THREE.MathUtils.clamp((eatU - 0.64) / 0.2, 0, 1) * Math.PI) * 0.09;
-    const totalShake = Math.max(this.camShake, impactShake + Math.abs(thrashShake) + gulp1Jolt + gulp2Jolt);
+    // Realistic cinematic impact camera shake, catch clamp shock, and swallow convulsion jolts
+    const impactShake = Math.exp(-eatU * 11.0) * 0.24;
+    const catchShock = Math.sin(THREE.MathUtils.clamp((eatU - 0.46) / 0.14, 0, 1) * Math.PI) * 0.14;
+    const gulp1Jolt = Math.sin(THREE.MathUtils.clamp((eatU - 0.58) / 0.18, 0, 1) * Math.PI) * 0.08;
+    const gulp2Jolt = Math.sin(THREE.MathUtils.clamp((eatU - 0.74) / 0.18, 0, 1) * Math.PI) * 0.095;
+    const totalShake = Math.max(this.camShake, impactShake + catchShock + gulp1Jolt + gulp2Jolt);
 
     if (totalShake > 0.001) {
       const hfX = Math.sin(this.simTime * 53.0) * 0.55 + (Math.random() - 0.5) * 0.9;
@@ -7964,9 +8166,9 @@ export class PoolGameEngine {
       this.camShake = Math.max(0, this.camShake - dt * 1.45);
     }
 
-    // Claustrophobic lens snap on strike, tightening inward as jaws close
-    const strikeKickFov = Math.exp(-eatU * 11.0) * 5.5;
-    const targetFov = THREE.MathUtils.lerp(68, 61.5, THREE.MathUtils.smoothstep(eatU, 0.22, 0.94)) + strikeKickFov;
+    // Wide terror framing during airborne launch, tightening inward as jaws clamp & swallow
+    const strikeKickFov = Math.exp(-eatU * 11.0) * 5.0 + airSin * 4.5;
+    const targetFov = THREE.MathUtils.lerp(68, 61.5, THREE.MathUtils.smoothstep(eatU, 0.46, 0.94)) + strikeKickFov;
     if (Math.abs(this.camera.fov - targetFov) > 0.04) {
       this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, dt > 0 ? Math.min(1, dt * 14) : 1);
       this.camera.updateProjectionMatrix();
@@ -7974,11 +8176,11 @@ export class PoolGameEngine {
 
     this.camera.lookAt(headWorld);
 
-    // Subtle handheld Dutch-roll trauma after lookAt so impact shock & gulps tilt the frame violently
-    const rollImpact = Math.sin(this.simTime * 34.0) * Math.exp(-eatU * 7.5) * 0.068;
-    const rollGulp = (Math.sin(this.simTime * 21.0) * (gulp1Jolt + gulp2Jolt) * 0.52);
-    const rollThrash = Math.sin(this.simTime * 17.5) * 0.016 * (1 - THREE.MathUtils.smoothstep(eatU, 0.45, 0.9));
-    this.camera.rotateZ(rollImpact + rollGulp + rollThrash);
+    // Subtle handheld Dutch-roll trauma after lookAt so impact shock & catch/gulps tilt the frame violently
+    const rollImpact = Math.sin(this.simTime * 34.0) * Math.exp(-eatU * 8.5) * 0.068;
+    const rollCatch = Math.sin(this.simTime * 27.0) * catchShock * 0.42;
+    const rollGulp = Math.sin(this.simTime * 21.0) * (gulp1Jolt + gulp2Jolt) * 0.52;
+    this.camera.rotateZ(rollImpact + rollCatch + rollGulp);
   }
 
   private updateDevourHorrorFX(m: RuntimeMonster | null, eatU: number, dt: number, headMatrixReady = false): void {
@@ -8029,16 +8231,22 @@ export class PoolGameEngine {
       const sideX = Math.cos(m.yaw) * this.eatingCamSide;
       const sideZ = -Math.sin(m.yaw) * this.eatingCamSide;
 
+      const spotAir = computeSerpentDevourAirborneLift(
+        eatU,
+        m.scale,
+        this.currentLevel.bounds.waterY,
+        this.currentLevel.bounds.ceilingY
+      );
       // Keep horrorSpotLight.castShadow permanently false to avoid WebGL shader recompilation & 2nd shadow pass stall
       this.horrorSpotLight.position.set(
         _vEatHeadPos.x + fwdX * 1.9 * m.scale + sideX * 2.1 * m.scale,
-        _vEatHeadPos.y + 4.9 * m.scale,
+        Math.min(this.currentLevel.bounds.ceilingY - 0.5, _vEatHeadPos.y + 4.9 * m.scale + spotAir.verticalOffset * 0.4),
         _vEatHeadPos.z + fwdZ * 1.9 * m.scale + sideZ * 2.1 * m.scale
       );
       this.horrorSpotLight.target.position.set(
-        _vEatHeadPos.x + fwdX * 0.35 * m.scale,
-        _vEatHeadPos.y - 0.12 * m.scale,
-        _vEatHeadPos.z + fwdZ * 0.35 * m.scale
+        _vEatHeadPos.x + fwdX * (0.35 * m.scale + spotAir.forwardOffset * 0.45),
+        _vEatHeadPos.y - 0.12 * m.scale + spotAir.verticalOffset * 0.45,
+        _vEatHeadPos.z + fwdZ * (0.35 * m.scale + spotAir.forwardOffset * 0.45)
       );
       this.horrorSpotLight.target.updateMatrixWorld();
       const spotFlicker =
@@ -8165,6 +8373,7 @@ export class PoolGameEngine {
       this.jumpscareTimer = EAT_DURATION_SEC;
       this.playerRig.root.scale.setScalar(1);
       this.playerRig.setVisible(true);
+      this.restoreLocalPlayerMeshes();
       this.beginMonsterEatingSequence(
         monster,
         '__local__',
@@ -8580,6 +8789,8 @@ export class PoolGameEngine {
     this._appliedViewportW = vp.w;
     this._appliedViewportH = vp.h;
     if (this.horrorComposer) {
+      const composerDpr = Math.min(Math.max(0.72, this._appliedPixelRatio > 0 ? this._appliedPixelRatio : 1), this.isTouchDevice ? 0.85 : 1.25);
+      this.horrorComposer.setPixelRatio(composerDpr);
       this.horrorComposer.setSize(vp.w, vp.h);
     }
     this.needsStaticRender = true;
