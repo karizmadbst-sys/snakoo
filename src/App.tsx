@@ -23,6 +23,7 @@ import { InGameVoiceHud } from './components/VoiceControls';
 import { setCharacterPreviewPaused } from './game/characterPreview';
 import { PoolGameEngine } from './game/engine';
 import { getLevelSummary, LEVEL_CATALOG, TOTAL_LEVELS } from './game/levels';
+import { requestAndroidFullscreen } from './game/fullscreen';
 import { preloadCoreAssets, waitAnimationFrames } from './game/preloader';
 import {
   CharacterId,
@@ -581,6 +582,7 @@ export default function App() {
 
   const handleStartLevel = useCallback(
     (levelId: number) => {
+      void requestAndroidFullscreen(false);
       const targetId = isLevelUnlocked(levelId, saveData) ? levelId : 1;
       const lvl = getLevelSummary(targetId);
       const token = beginLoadingTransition(
@@ -622,6 +624,7 @@ export default function App() {
 
   const handleRestart = useCallback(() => {
     if (isMpMatchRef.current) return;
+    void requestAndroidFullscreen(false);
     const lvl = getLevelSummary(activeLevelIdRef.current);
     const token = beginLoadingTransition(`RESTARTING ${lvl.code}...`, lvl.name.toUpperCase(), 20);
     setIsTransitioningToPlay(true);
@@ -646,6 +649,7 @@ export default function App() {
 
   const handleRespawnCheckpoint = useCallback(() => {
     if (isMpMatchRef.current) return;
+    void requestAndroidFullscreen(false);
     setPhase('playing');
     engineRef.current?.respawnAtCheckpoint();
   }, []);
@@ -656,6 +660,7 @@ export default function App() {
   }, []);
 
   const handleResume = useCallback(() => {
+    void requestAndroidFullscreen(false);
     setShowSettings(false);
     setShowLevels(false);
     setPhase('playing');
@@ -801,7 +806,7 @@ export default function App() {
   const mpBadgeCount = mpSnap.pendingInvites.length + mpSnap.incomingRequests.length;
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-[#0b1012]">
+    <div className="fixed inset-0 w-full h-full overflow-hidden bg-[#0b1012]">
       {/* Isolated WebGL Canvas Host */}
       <div ref={canvasHostRef} className="game-canvas-host absolute inset-0 z-0" />
 

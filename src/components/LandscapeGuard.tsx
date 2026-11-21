@@ -1,22 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Maximize2, RotateCw, Smartphone } from 'lucide-react';
+import {
+  attachAndroidFullscreenLifecycle,
+  isMobileTouchDevice,
+  requestAndroidFullscreen,
+} from '../game/fullscreen';
 
 interface LandscapeGuardProps {
   onPortraitBlockChange?: (blocked: boolean) => void;
-}
-
-function detectMobileDevice(): boolean {
-  if (typeof window === 'undefined') return false;
-  const ua = navigator.userAgent || '';
-  const mobileUa = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
-  const coarsePointer =
-    typeof window.matchMedia === 'function' &&
-    (window.matchMedia('(pointer: coarse)').matches ||
-      window.matchMedia('(any-pointer: coarse)').matches);
-  const hasTouch = 'ontouchstart' in window || (navigator.maxTouchPoints ?? 0) > 0;
-  // Treat touch/mobile devices (phones & tablets) as mobile for landscape enforcement
-  const shortSide = Math.min(window.screen?.width || window.innerWidth, window.screen?.height || window.innerHeight);
-  return mobileUa || (coarsePointer && hasTouch) || (hasTouch && shortSide <= 1024);
 }
 
 function getViewportDimensions(): { width: number; height: number } {
@@ -27,56 +18,27 @@ function getViewportDimensions(): { width: number; height: number } {
   return { width, height };
 }
 
-async function tryLockLandscapeOrientation(requestFs: boolean): Promise<boolean> {
-  try {
-    if (requestFs && !document.fullscreenElement) {
-      const rootEl = document.documentElement as HTMLElement & {
-        webkitRequestFullscreen?: () => Promise<void> | void;
-      };
-      if (typeof rootEl.requestFullscreen === 'function') {
-        await rootEl.requestFullscreen({ navigationUI: 'hide' } as FullscreenOptions).catch(() => undefined);
-      } else if (typeof rootEl.webkitRequestFullscreen === 'function') {
-        await Promise.resolve(rootEl.webkitRequestFullscreen()).catch(() => undefined);
-      }
-    }
-  } catch {
-    // Fullscreen may be unsupported (e.g., iOS Safari); continue to orientation lock check
-  }
-
-  try {
-    const orientation = window.screen?.orientation as
-      | (ScreenOrientation & { lock?: (orientation: string) => Promise<void> })
-      | undefined;
-    if (orientation && typeof orientation.lock === 'function') {
-      await orientation.lock('landscape');
-      return true;
-    }
-  } catch {
-    // Browser blocked orientation lock (requires fullscreen or iOS Safari)
-  }
-  return false;
-}
-
 export const LandscapeGuard: React.FC<LandscapeGuardProps> = ({ onPortraitBlockChange }) => {
-  const [isMobile, setIsMobile] = useState<boolean>(() => detectMobileDevice());
+  const [isMobile, setIsMobile] = useState<boolean>(() => isMobileTouchDevice());
   const [isPortrait, setIsPortrait] = useState<boolean>(() => {
     const { width, height } = getViewportDimensions();
     return height > width;
   });
 
   const evaluateOrientation = useCallback(() => {
-    const mobile = detectMobileDevice();
+    const mobile = isMobileTouchDevice();
     const { width, height } = getViewportDimensions();
     setIsMobile(mobile);
     setIsPortrait(height > width);
   }, []);
 
-  // Attempt native landscape lock on startup & on first mobile user interaction
+  // Enforce true Android fullscreen + native landscape lock across startup, focus, and user touches
   useEffect(() => {
     evaluateOrientation();
+    const detachFullscreenLifecycle = attachAndroidFullscreenLifecycle();
 
-    if (detectMobileDevice()) {
-      void tryLockLandscapeOrientation(false);
+    if (isMobileTouchDevice()) {
+      void requestAndroidFullscreen(false);
     }
 
     let settleTimer: number | null = null;
@@ -85,30 +47,24 @@ export const LandscapeGuard: React.FC<LandscapeGuardProps> = ({ onPortraitBlockC
       if (settleTimer !== null) window.clearTimeout(settleTimer);
       settleTimer = window.setTimeout(() => {
         evaluateOrientation();
-        if (detectMobileDevice()) {
-          void tryLockLandscapeOrientation(false);
+        if (isMobileTouchDevice()) {
+          void requestAndroidFullscreen(false);
         }
       }, 140);
-    };
-
-    const handleFirstInteraction = () => {
-      if (!detectMobileDevice()) return;
-      void tryLockLandscapeOrientation(false);
     };
 
     window.addEventListener('resize', handleViewportChange, { passive: true });
     window.addEventListener('orientationchange', handleViewportChange, { passive: true });
     window.visualViewport?.addEventListener('resize', handleViewportChange, { passive: true });
     window.screen?.orientation?.addEventListener?.('change', handleViewportChange);
-    window.addEventListener('pointerdown', handleFirstInteraction, { passive: true, once: true });
 
     return () => {
+      detachFullscreenLifecycle();
       if (settleTimer !== null) window.clearTimeout(settleTimer);
       window.removeEventListener('resize', handleViewportChange);
       window.removeEventListener('orientationchange', handleViewportChange);
       window.visualViewport?.removeEventListener('resize', handleViewportChange);
       window.screen?.orientation?.removeEventListener?.('change', handleViewportChange);
-      window.removeEventListener('pointerdown', handleFirstInteraction);
     };
   }, [evaluateOrientation]);
 
@@ -119,7 +75,7 @@ export const LandscapeGuard: React.FC<LandscapeGuardProps> = ({ onPortraitBlockC
   }, [portraitBlocked, onPortraitBlockChange]);
 
   const handleLockFullscreenLandscape = async () => {
-    await tryLockLandscapeOrientation(true);
+    await requestAndroidFullscreen(true);
     evaluateOrientation();
   };
 

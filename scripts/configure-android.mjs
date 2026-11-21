@@ -69,9 +69,322 @@ if (manifestChanged) {
   fs.writeFileSync(manifestPath, xml, 'utf8');
 }
 
+// Configure Android native themes/styles for true edge-to-edge fullscreen across API levels
+const resDir = path.join(androidMainDir, 'res');
+const valuesDir = path.join(resDir, 'values');
+const valuesV28Dir = path.join(resDir, 'values-v28');
+const valuesV29Dir = path.join(resDir, 'values-v29');
+fs.mkdirSync(valuesDir, { recursive: true });
+fs.mkdirSync(valuesV28Dir, { recursive: true });
+fs.mkdirSync(valuesV29Dir, { recursive: true });
+
+fs.writeFileSync(
+  path.join(valuesDir, 'styles.xml'),
+  `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
+    </style>
+
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:background">@null</item>
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
+    </style>
+
+    <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:background">@drawable/splash</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+    </style>
+</resources>
+`,
+  'utf8'
+);
+
+fs.writeFileSync(
+  path.join(valuesV28Dir, 'styles.xml'),
+  `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:background">@null</item>
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
+    </style>
+
+    <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:background">@drawable/splash</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+    </style>
+</resources>
+`,
+  'utf8'
+);
+
+fs.writeFileSync(
+  path.join(valuesV29Dir, 'styles.xml'),
+  `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:background">@null</item>
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
+    </style>
+
+    <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:background">@drawable/splash</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+    </style>
+</resources>
+`,
+  'utf8'
+);
+
+// Locate and patch MainActivity.java to enforce Android Sticky Immersive Fullscreen across all API levels & OEM skins
+function findMainActivity(dir) {
+  if (!fs.existsSync(dir)) return null;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const found = findMainActivity(full);
+      if (found) return found;
+    } else if (entry.name === 'MainActivity.java') {
+      return full;
+    }
+  }
+  return null;
+}
+
+const javaDir = path.join(androidMainDir, 'java');
+const mainActivityPath = findMainActivity(javaDir) ?? path.join(javaDir, 'com/serpentis/horror/MainActivity.java');
+let packageName = 'com.serpentis.horror';
+if (fs.existsSync(mainActivityPath)) {
+  const curSrc = fs.readFileSync(mainActivityPath, 'utf8');
+  const pkgMatch = curSrc.match(/^\s*package\s+([a-zA-Z0-9_.]+)\s*;/m);
+  if (pkgMatch) {
+    packageName = pkgMatch[1];
+  }
+}
+
+fs.mkdirSync(path.dirname(mainActivityPath), { recursive: true });
+fs.writeFileSync(
+  mainActivityPath,
+  `package ${packageName};
+
+import android.annotation.SuppressLint;
+import android.graphics.Color;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebView;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {
+    private final Handler immersiveHandler = new Handler(Looper.getMainLooper());
+    private final Runnable reapplyImmersiveRunnable = this::applyImmersiveFullscreen;
+    private boolean jsBridgeAttached = false;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        prepareImmersiveWindowFlags();
+        super.onCreate(savedInstanceState);
+        applyImmersiveFullscreen();
+        installSystemBarGuard();
+    }
+
+    @Override
+    public void onStart() {
+        super.onStart();
+        applyImmersiveFullscreen();
+        attachJsFullscreenBridge();
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        applyImmersiveFullscreen();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            applyImmersiveFullscreen();
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        immersiveHandler.removeCallbacksAndMessages(null);
+        super.onDestroy();
+    }
+
+    @SuppressLint("AddJavascriptInterface")
+    private void attachJsFullscreenBridge() {
+        if (jsBridgeAttached || this.bridge == null) return;
+        WebView webView = this.bridge.getWebView();
+        if (webView == null) return;
+        jsBridgeAttached = true;
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void enterFullscreen() {
+                runOnUiThread(() -> applyImmersiveFullscreen());
+            }
+        }, "SerpentisAndroidFullscreen");
+    }
+
+    private void prepareImmersiveWindowFlags() {
+        Window window = getWindow();
+        if (window == null) return;
+        WindowCompat.setDecorFitsSystemWindows(window, false);
+        window.clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_FULLSCREEN |
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS |
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        );
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            WindowManager.LayoutParams lp = window.getAttributes();
+            lp.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            window.setAttributes(lp);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void installSystemBarGuard() {
+        Window window = getWindow();
+        if (window == null) return;
+        View decorView = window.getDecorView();
+        ViewCompat.setOnApplyWindowInsetsListener(decorView, (v, insets) -> {
+            boolean imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime());
+            boolean barsVisible = insets.isVisible(WindowInsetsCompat.Type.statusBars())
+                || insets.isVisible(WindowInsetsCompat.Type.navigationBars());
+            if (!imeVisible && barsVisible) {
+                scheduleImmersiveReapply(120L);
+            }
+            return ViewCompat.onApplyWindowInsets(v, insets);
+        });
+        decorView.setOnSystemUiVisibilityChangeListener(visibility -> {
+            boolean barsShown = (visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0
+                || (visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0;
+            if (barsShown) {
+                scheduleImmersiveReapply(120L);
+            }
+        });
+    }
+
+    private void scheduleImmersiveReapply(long delayMs) {
+        immersiveHandler.removeCallbacks(reapplyImmersiveRunnable);
+        immersiveHandler.postDelayed(reapplyImmersiveRunnable, delayMs);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyImmersiveFullscreen() {
+        Window window = getWindow();
+        if (window == null) return;
+        prepareImmersiveWindowFlags();
+
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.setNavigationBarContrastEnforced(false);
+            window.setStatusBarContrastEnforced(false);
+        }
+
+        View decorView = window.getDecorView();
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, decorView);
+        if (controller != null) {
+            controller.setSystemBarsBehavior(
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            );
+            controller.hide(WindowInsetsCompat.Type.systemBars());
+        }
+
+        decorView.setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+            View.SYSTEM_UI_FLAG_FULLSCREEN
+        );
+    }
+}
+`,
+  'utf8'
+);
+console.log(`Configured sticky immersive edge-to-edge fullscreen in ${mainActivityPath} (${packageName}) and styles.xml.`);
+
 // Sync official SERPENTIS launcher icons into Android res/mipmap-* folders
 const sourceIconsRoot = path.resolve(process.cwd(), 'scripts/android-icons');
-const resDir = path.join(androidMainDir, 'res');
+
+// Always ensure background color resource exists (referenced by styles.xml & adaptive icon)
+const bgPath = path.join(resDir, 'values', 'ic_launcher_background.xml');
+fs.mkdirSync(path.dirname(bgPath), { recursive: true });
+fs.writeFileSync(
+  bgPath,
+  `<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#0b1012</color>\n</resources>\n`,
+  'utf8'
+);
 
 if (fs.existsSync(sourceIconsRoot)) {
   const densities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'];
@@ -91,15 +404,6 @@ if (fs.existsSync(sourceIconsRoot)) {
       }
     }
   }
-
-  // Ensure adaptive icon background matches SERPENTIS dark teal-obsidian theme
-  const bgPath = path.join(resDir, 'values', 'ic_launcher_background.xml');
-  fs.mkdirSync(path.dirname(bgPath), { recursive: true });
-  fs.writeFileSync(
-    bgPath,
-    `<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#0b1012</color>\n</resources>\n`,
-    'utf8'
-  );
 
   // Ensure Android strings.xml sets app_name to SERPENTIS
   const stringsPath = path.join(resDir, 'values', 'strings.xml');

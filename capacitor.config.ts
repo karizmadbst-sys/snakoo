@@ -13,6 +13,14 @@ const config: CapacitorConfig = {
     allowMixedContent: false,
     webContentsDebuggingEnabled: false,
   },
+  plugins: {
+    SystemBars: {
+      hidden: true,
+      insetsHandling: 'disable',
+      style: 'DARK',
+      initialViewportFitValueHint: 'cover',
+    },
+  },
 };
 
 export default config;
